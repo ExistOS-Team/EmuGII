@@ -51,6 +51,15 @@ struct STMP3770PINCTRLState {
     uint32_t irqlevel[4];
     uint32_t irqpol[4];
     uint32_t irqstat[4];
+
+    /*
+     * HP39GII keyboard matrix host state.  Key ids use the ExistOS encoding:
+     * (row << 3) + col, with rows 0..10 and columns 0..4.
+     */
+    uint64_t key_state[2];
 };
+
+void stmp3770_pinctrl_set_key(STMP3770PINCTRLState *s,
+                              unsigned int key, bool down);
 
 #endif /* STMP3770_PINCTRL_H */

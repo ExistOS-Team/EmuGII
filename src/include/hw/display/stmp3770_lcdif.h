@@ -22,10 +22,24 @@
 #include "hw/sysbus.h"
 #include "ui/console.h"
 #include "ui/surface.h"
+#include "ui/input.h"
 #include "hw/display/framebuffer.h"
+#include "hw/dma/stmp3770_dma.h"
+#include "hw/gpio/stmp3770_pinctrl.h"
 
 #define TYPE_STMP3770_LCDIF "stmp3770-lcdif"
 OBJECT_DECLARE_SIMPLE_TYPE(STMP3770LCDIFState, STMP3770_LCDIF)
+
+#define STMP3770_LCDIF_PANEL_WIDTH  258
+#define STMP3770_LCDIF_PANEL_HEIGHT 137
+#define STMP3770_LCDIF_PANEL_SIZE \
+    (STMP3770_LCDIF_PANEL_WIDTH * STMP3770_LCDIF_PANEL_HEIGHT)
+#define STMP3770_LCDIF_VIEW_WIDTH  256
+#define STMP3770_LCDIF_VIEW_HEIGHT 128
+#define STMP3770_LCDIF_VIEW_Y      8
+
+#define STMP3770_LCDIF_FRONTPANEL_WIDTH  1000
+#define STMP3770_LCDIF_FRONTPANEL_HEIGHT 625
 
 struct STMP3770LCDIFState {
     SysBusDevice parent_obj;
@@ -50,9 +64,38 @@ struct STMP3770LCDIFState {
 
     qemu_irq irq_out;
 
+    STMP3770DMAState *dma;
+    int dma_channel;
+
+    uint32_t dma_pio_ctrl;
+    uint8_t panel_cmd;
+    uint8_t panel_param_cmd;
+    uint8_t panel_param_len;
+    uint8_t panel_param[4];
+    uint16_t panel_x_start;
+    uint16_t panel_x_end;
+    uint16_t panel_y_start;
+    uint16_t panel_y_end;
+    uint16_t panel_x;
+    uint16_t panel_y;
+    uint8_t panel_vram[STMP3770_LCDIF_PANEL_SIZE];
+    bool panel_dirty;
+
+    STMP3770PINCTRLState *pinctrl;
+    QemuInputHandlerState *input_handler;
+    uint64_t frontpanel_key_state[2];
+    int frontpanel_mouse_x;
+    int frontpanel_mouse_y;
+    int frontpanel_mouse_key;
+
     int width;
     int height;
     pixman_format_code_t surface_format;
 };
+
+void stmp3770_lcdif_set_dma(STMP3770LCDIFState *s, STMP3770DMAState *dma,
+                            int channel);
+void stmp3770_lcdif_set_pinctrl(STMP3770LCDIFState *s,
+                                STMP3770PINCTRLState *pinctrl);
 
 #endif /* STMP3770_LCDIF_H */

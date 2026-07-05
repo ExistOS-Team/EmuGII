@@ -43,10 +43,10 @@
 
 #define REG_VERSION         0x3F0
 
-/* SET/CLR/TOG sub-offsets */
-#define SCT_SET             0x4
-#define SCT_CLR             0x8
-#define SCT_TOG             0xC
+/* SET/CLR/TOG selector values decoded from register offset bits [3:2]. */
+#define SCT_SET             1
+#define SCT_CLR             2
+#define SCT_TOG             3
 
 /* CTRL0 bits */
 #define CTRL0_SFTRST                (1U << 31)

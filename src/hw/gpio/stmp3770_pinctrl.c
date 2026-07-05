@@ -129,6 +129,83 @@ static const uint32_t bank_pin_mask[STMP3770_PINCTRL_NUM_BANKS] = {
 #define HP39GII_KEY_COL_MASK ((1U << 22) | (1U << 23) | (1U << 25) | \
                               (1U << 26) | (1U << 27))
 
+typedef struct HP39GIIKeyLine {
+    uint8_t bank;
+    uint8_t pin;
+} HP39GIIKeyLine;
+
+static const HP39GIIKeyLine hp39gii_key_rows[10] = {
+    { 2, 6 },  /* row 0 */
+    { 2, 5 },  /* row 1 */
+    { 2, 4 },  /* row 2 */
+    { 2, 2 },  /* row 3 */
+    { 2, 3 },  /* row 4 */
+    { 1, 24 }, /* row 5 */
+    { 2, 8 },  /* row 6 */
+    { 2, 7 },  /* row 7 */
+    { 0, 20 }, /* row 8 */
+    { 2, 14 }, /* row 9 */
+};
+
+static const uint8_t hp39gii_key_col_pins[5] = {
+    23, 25, 27, 26, 22,
+};
+
+static bool hp39gii_key_down(STMP3770PINCTRLState *s, unsigned int key)
+{
+    if (key >= 128) {
+        return false;
+    }
+    return (s->key_state[key >> 6] & (1ULL << (key & 63))) != 0;
+}
+
+static bool hp39gii_row_is_driven_low(STMP3770PINCTRLState *s,
+                                      unsigned int row)
+{
+    const HP39GIIKeyLine *line = &hp39gii_key_rows[row];
+    uint32_t mask = 1U << line->pin;
+
+    return (s->doe[line->bank] & mask) != 0 &&
+           (s->dout[line->bank] & mask) == 0;
+}
+
+static void hp39gii_apply_keyboard_columns(STMP3770PINCTRLState *s,
+                                           uint32_t *val)
+{
+    unsigned int row;
+    unsigned int col;
+
+    for (row = 0; row < ARRAY_SIZE(hp39gii_key_rows); row++) {
+        if (!hp39gii_row_is_driven_low(s, row)) {
+            continue;
+        }
+
+        for (col = 0; col < ARRAY_SIZE(hp39gii_key_col_pins); col++) {
+            unsigned int key = (row << 3) + col;
+            uint32_t col_mask = 1U << hp39gii_key_col_pins[col];
+
+            if (hp39gii_key_down(s, key) && (HP39GII_KEY_COL_MASK & col_mask) &&
+                (s->doe[HP39GII_KEY_COL_BANK] & col_mask) == 0) {
+                *val &= ~col_mask;
+            }
+        }
+    }
+}
+
+void stmp3770_pinctrl_set_key(STMP3770PINCTRLState *s,
+                              unsigned int key, bool down)
+{
+    if (key >= 128) {
+        return;
+    }
+
+    if (down) {
+        s->key_state[key >> 6] |= 1ULL << (key & 63);
+    } else {
+        s->key_state[key >> 6] &= ~(1ULL << (key & 63));
+    }
+}
+
 static inline int bank_from_offset(unsigned offset)
 {
     if (offset >= REG_DOUT0 && offset < REG_DOUT0 + 0x100) {
@@ -184,6 +261,12 @@ static uint32_t stmp3770_pinctrl_read_din(STMP3770PINCTRLState *s, int bank)
         uint32_t input_cols = HP39GII_KEY_COL_MASK & ~s->doe[bank];
 
         val |= input_cols;
+        hp39gii_apply_keyboard_columns(s, &val);
+    }
+
+    if (bank == 0 && hp39gii_key_down(s, (10U << 3)) &&
+        (s->doe[0] & (1U << 14)) == 0) {
+        val |= 1U << 14;
     }
 
     return val;
@@ -239,6 +322,7 @@ static void stmp3770_pinctrl_reset(DeviceState *dev)
         s->irqpol[i] = 0;
         s->irqstat[i] = 0;
     }
+    memset(s->key_state, 0, sizeof(s->key_state));
 
     stmp3770_pinctrl_update_irq(s);
 }
@@ -508,6 +592,7 @@ static const VMStateDescription vmstate_stmp3770_pinctrl = {
         VMSTATE_UINT32_ARRAY(irqlevel, STMP3770PINCTRLState, 4),
         VMSTATE_UINT32_ARRAY(irqpol, STMP3770PINCTRLState, 4),
         VMSTATE_UINT32_ARRAY(irqstat, STMP3770PINCTRLState, 4),
+        VMSTATE_UINT64_ARRAY(key_state, STMP3770PINCTRLState, 2),
         VMSTATE_END_OF_LIST()
     }
 };

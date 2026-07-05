@@ -320,6 +320,9 @@ static void stmp3770_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(s->lcdif), 0,
                        qdev_get_gpio_in(DEVICE(s->icoll), STMP3770_IRQ_LCDIF_ERROR));
 
+    stmp3770_lcdif_set_dma(s->lcdif, s->apbh_dma, 0);
+    stmp3770_lcdif_set_pinctrl(s->lcdif, s->pinctrl);
+
     /* Realize Audio DAC */
     if (!sysbus_realize(SYS_BUS_DEVICE(s->audio_dac), errp)) {
         return;
