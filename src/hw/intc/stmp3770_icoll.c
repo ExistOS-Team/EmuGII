@@ -219,13 +219,47 @@ static void stmp3770_icoll_write(void *opaque, hwaddr offset,
                                   uint64_t value, unsigned size)
 {
     STMP3770ICOLLState *s = STMP3770_ICOLL(opaque);
-    uint32_t val = value;
+    hwaddr base_offset = offset & ~0xF;
     bool is_set = (offset & 0xF) == REG_SET;
     bool is_clr = (offset & 0xF) == REG_CLR;
     bool is_tog = (offset & 0xF) == REG_TOG;
     uint32_t *target = NULL;
+    uint32_t val;
 
-    offset &= ~0xF;
+    /* Handle sub-word writes (byte/halfword) for bitfield access */
+    if (size < 4) {
+        unsigned shift = (offset & 3) * 8;
+        uint32_t mask = ((1ULL << (size * 8)) - 1) << shift;
+
+        /* Read-modify-write for sub-word access */
+        switch (base_offset) {
+        case REG_CTRL:
+            target = &s->ctrl;
+            break;
+        case REG_VBASE:
+            target = &s->vbase;
+            break;
+        case REG_PRIORITY0 ... REG_PRIORITY15:
+            target = &s->priority[(base_offset - REG_PRIORITY0) / 0x10];
+            break;
+        default:
+            qemu_log_mask(LOG_GUEST_ERROR,
+                         "%s: sub-word write to unsupported offset 0x%" HWADDR_PRIx "\n",
+                         __func__, offset);
+            return;
+        }
+
+        if (target) {
+            *target = (*target & ~mask) | ((value << shift) & mask);
+        }
+
+        stmp3770_icoll_update(s);
+        return;
+    }
+
+    /* Standard 32-bit write handling */
+    val = value;
+    offset = base_offset;
 
     switch (offset) {
     case REG_CTRL:
