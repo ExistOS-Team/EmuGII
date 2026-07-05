@@ -1,0 +1,382 @@
+/*
+ * STMP3770 Clock Generation and Control (CLKCTRL)
+ *
+ * Based on STMP3770 Reference Manual Chapter 4
+ *
+ * Features:
+ * - 480 MHz PLL with Phase Fractional Dividers (PFD)
+ * - Multiple clock domains (CPU, HBUS, XBUS, SSP, GPMI, PIX, etc.)
+ * - Clock gating and power management
+ * - SET/CLR/TOG register support
+ *
+ * Copyright (C) 2024
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the
+ * Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ */
+
+#include "qemu/osdep.h"
+#include "hw/sysbus.h"
+#include "migration/vmstate.h"
+#include "qemu/log.h"
+#include "qemu/module.h"
+#include "hw/misc/stmp3770_clkctrl.h"
+
+/* Register offsets */
+#define REG_PLLCTRL0        0x000
+#define REG_PLLCTRL1        0x010
+#define REG_CPU             0x020
+#define REG_HBUS            0x030
+#define REG_XBUS            0x040
+#define REG_XTAL            0x050
+#define REG_PIX             0x060
+#define REG_SSP             0x070
+#define REG_GPMI            0x080
+#define REG_SPDIF           0x090
+#define REG_FRAC            0x0D0
+#define REG_CLKSEQ          0x0E0
+#define REG_RESET           0x0F0
+#define REG_VERSION         0x100
+
+/* SET/CLR/TOG offsets */
+#define REG_SET             0x4
+#define REG_CLR             0x8
+#define REG_TOG             0xC
+
+/* PLLCTRL0 bits */
+#define PLLCTRL0_POWER          (1 << 16)
+#define PLLCTRL0_EN_USB_CLKS    (1 << 18)
+
+/* CPU register bits */
+#define CPU_DIV_CPU_MASK        0x3F
+#define CPU_DIV_CPU_FRAC_EN     (1 << 18)
+#define CPU_BUSY_REF_CPU        (1 << 28)
+#define CPU_BUSY_REF_XTAL       (1 << 29)
+
+/* HBUS register bits */
+#define HBUS_DIV_MASK           0x1F
+#define HBUS_DIV_FRAC_EN        (1 << 5)
+#define HBUS_SLOW_DIV_MASK      (0x7 << 16)
+#define HBUS_AUTO_SLOW_MODE     (1 << 20)
+
+/* FRAC register - Phase Fractional Dividers */
+#define FRAC_CLKGATECPU         (1 << 7)
+#define FRAC_CPUFRAC_MASK       0x3F
+#define FRAC_CLKGATEIO          (1 << 15)
+#define FRAC_IOFRAC_MASK        (0x3F << 8)
+#define FRAC_CLKGATEPIX         (1 << 23)
+#define FRAC_PIXFRAC_MASK       (0x3F << 16)
+
+/* Version register */
+#define VERSION_MAJOR           0x02
+#define VERSION_MINOR           0x01
+#define VERSION_STEP            0x00
+
+#define TYPE_STMP3770_CLKCTRL "stmp3770-clkctrl"
+
+struct STMP3770CLKCTRLState {
+    SysBusDevice parent_obj;
+
+    MemoryRegion iomem;
+
+    /* Registers */
+    uint32_t pllctrl0;
+    uint32_t pllctrl1;
+    uint32_t cpu;
+    uint32_t hbus;
+    uint32_t xbus;
+    uint32_t xtal;
+    uint32_t pix;
+    uint32_t ssp;
+    uint32_t gpmi;
+    uint32_t spdif;
+    uint32_t frac;
+    uint32_t clkseq;
+    uint32_t reset;
+
+    /* Clock state */
+    bool pll_powered;
+    bool pll_locked;
+};
+
+/* Helper: Calculate actual clock frequency (for future use) */
+static uint32_t stmp3770_clkctrl_get_cpu_freq(STMP3770CLKCTRLState *s)
+{
+    /* Simplified: assume 24 MHz XTAL for now */
+    uint32_t base_freq = 24000000;
+    uint32_t div = (s->cpu & CPU_DIV_CPU_MASK);
+
+    if (div == 0) {
+        div = 1;
+    }
+
+    return base_freq / div;
+}
+
+static uint64_t stmp3770_clkctrl_read(void *opaque, hwaddr offset, unsigned size)
+{
+    STMP3770CLKCTRLState *s = STMP3770_CLKCTRL(opaque);
+    uint32_t value = 0;
+
+    /* Handle SET/CLR/TOG - they read the same as base register */
+    offset &= ~0xF;
+
+    switch (offset) {
+    case REG_PLLCTRL0:
+        value = s->pllctrl0;
+        break;
+
+    case REG_PLLCTRL1:
+        value = s->pllctrl1;
+        if (s->pll_locked) {
+            value |= (1 << 31);  /* LOCK bit */
+        }
+        break;
+
+    case REG_CPU:
+        value = s->cpu;
+        /* BUSY bits are typically 0 in steady state */
+        break;
+
+    case REG_HBUS:
+        value = s->hbus;
+        break;
+
+    case REG_XBUS:
+        value = s->xbus;
+        break;
+
+    case REG_XTAL:
+        value = s->xtal;
+        break;
+
+    case REG_PIX:
+        value = s->pix;
+        break;
+
+    case REG_SSP:
+        value = s->ssp;
+        break;
+
+    case REG_GPMI:
+        value = s->gpmi;
+        break;
+
+    case REG_SPDIF:
+        value = s->spdif;
+        break;
+
+    case REG_FRAC:
+        value = s->frac;
+        break;
+
+    case REG_CLKSEQ:
+        value = s->clkseq;
+        break;
+
+    case REG_RESET:
+        value = s->reset;
+        break;
+
+    case REG_VERSION:
+        value = (VERSION_MAJOR << 24) | (VERSION_MINOR << 16) | VERSION_STEP;
+        break;
+
+    default:
+        qemu_log_mask(LOG_GUEST_ERROR,
+                     "%s: bad offset 0x%" HWADDR_PRIx "\n", __func__, offset);
+        break;
+    }
+
+    return value;
+}
+
+static void stmp3770_clkctrl_write(void *opaque, hwaddr offset,
+                                    uint64_t value, unsigned size)
+{
+    STMP3770CLKCTRLState *s = STMP3770_CLKCTRL(opaque);
+    uint32_t val = value;
+    bool is_set = (offset & 0xF) == REG_SET;
+    bool is_clr = (offset & 0xF) == REG_CLR;
+    bool is_tog = (offset & 0xF) == REG_TOG;
+    uint32_t *target = NULL;
+
+    offset &= ~0xF;
+
+    switch (offset) {
+    case REG_PLLCTRL0:
+        target = &s->pllctrl0;
+        /* Check if PLL is being powered on */
+        if (!is_clr && (val & PLLCTRL0_POWER)) {
+            s->pll_powered = true;
+            /* Simulate instant lock (real HW needs ~10us) */
+            s->pll_locked = true;
+        } else if (is_clr && (val & PLLCTRL0_POWER)) {
+            s->pll_powered = false;
+            s->pll_locked = false;
+        }
+        break;
+
+    case REG_PLLCTRL1:
+        target = &s->pllctrl1;
+        break;
+
+    case REG_CPU:
+        target = &s->cpu;
+        break;
+
+    case REG_HBUS:
+        target = &s->hbus;
+        break;
+
+    case REG_XBUS:
+        target = &s->xbus;
+        break;
+
+    case REG_XTAL:
+        target = &s->xtal;
+        break;
+
+    case REG_PIX:
+        target = &s->pix;
+        break;
+
+    case REG_SSP:
+        target = &s->ssp;
+        break;
+
+    case REG_GPMI:
+        target = &s->gpmi;
+        break;
+
+    case REG_SPDIF:
+        target = &s->spdif;
+        break;
+
+    case REG_FRAC:
+        target = &s->frac;
+        break;
+
+    case REG_CLKSEQ:
+        target = &s->clkseq;
+        break;
+
+    case REG_RESET:
+        target = &s->reset;
+        /* Handle soft reset if needed */
+        if (val & (1 << 0)) {
+            /* CHIP_RESET bit */
+            qemu_log_mask(LOG_UNIMP, "%s: chip reset requested\n", __func__);
+        }
+        break;
+
+    case REG_VERSION:
+        /* Read-only, ignore writes */
+        return;
+
+    default:
+        qemu_log_mask(LOG_GUEST_ERROR,
+                     "%s: bad offset 0x%" HWADDR_PRIx "\n", __func__, offset);
+        return;
+    }
+
+    if (target) {
+        if (is_set) {
+            *target |= val;
+        } else if (is_clr) {
+            *target &= ~val;
+        } else if (is_tog) {
+            *target ^= val;
+        } else {
+            *target = val;
+        }
+    }
+}
+
+static const MemoryRegionOps stmp3770_clkctrl_ops = {
+    .read = stmp3770_clkctrl_read,
+    .write = stmp3770_clkctrl_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+};
+
+static void stmp3770_clkctrl_reset(DeviceState *dev)
+{
+    STMP3770CLKCTRLState *s = STMP3770_CLKCTRL(dev);
+
+    /* Reset to defaults - most come up from XTAL at 24 MHz */
+    s->pllctrl0 = 0;
+    s->pllctrl1 = 0;
+    s->cpu = 0x00010001;      /* Default dividers */
+    s->hbus = 0x00000003;     /* HBUS div 3 */
+    s->xbus = 0x00000001;     /* XBUS div 1 */
+    s->xtal = 0;
+    s->pix = 0;
+    s->ssp = 0;
+    s->gpmi = 0;
+    s->spdif = 0;
+    s->frac = 0x92929292;     /* Default PFD values */
+    s->clkseq = 0xFFFF;       /* All clocks from XTAL */
+    s->reset = 0;
+
+    s->pll_powered = false;
+    s->pll_locked = false;
+}
+
+static void stmp3770_clkctrl_init(Object *obj)
+{
+    STMP3770CLKCTRLState *s = STMP3770_CLKCTRL(obj);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+
+    memory_region_init_io(&s->iomem, obj, &stmp3770_clkctrl_ops, s,
+                         TYPE_STMP3770_CLKCTRL, 0x200);
+    sysbus_init_mmio(sbd, &s->iomem);
+}
+
+static const VMStateDescription vmstate_stmp3770_clkctrl = {
+    .name = TYPE_STMP3770_CLKCTRL,
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(pllctrl0, STMP3770CLKCTRLState),
+        VMSTATE_UINT32(pllctrl1, STMP3770CLKCTRLState),
+        VMSTATE_UINT32(cpu, STMP3770CLKCTRLState),
+        VMSTATE_UINT32(hbus, STMP3770CLKCTRLState),
+        VMSTATE_UINT32(xbus, STMP3770CLKCTRLState),
+        VMSTATE_UINT32(xtal, STMP3770CLKCTRLState),
+        VMSTATE_UINT32(pix, STMP3770CLKCTRLState),
+        VMSTATE_UINT32(ssp, STMP3770CLKCTRLState),
+        VMSTATE_UINT32(gpmi, STMP3770CLKCTRLState),
+        VMSTATE_UINT32(spdif, STMP3770CLKCTRLState),
+        VMSTATE_UINT32(frac, STMP3770CLKCTRLState),
+        VMSTATE_UINT32(clkseq, STMP3770CLKCTRLState),
+        VMSTATE_UINT32(reset, STMP3770CLKCTRLState),
+        VMSTATE_BOOL(pll_powered, STMP3770CLKCTRLState),
+        VMSTATE_BOOL(pll_locked, STMP3770CLKCTRLState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static void stmp3770_clkctrl_class_init(ObjectClass *klass, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    device_class_set_legacy_reset(dc, stmp3770_clkctrl_reset);
+    dc->vmsd = &vmstate_stmp3770_clkctrl;
+}
+
+static const TypeInfo stmp3770_clkctrl_info = {
+    .name          = TYPE_STMP3770_CLKCTRL,
+    .parent        = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(STMP3770CLKCTRLState),
+    .instance_init = stmp3770_clkctrl_init,
+    .class_init    = stmp3770_clkctrl_class_init,
+};
+
+static void stmp3770_clkctrl_register_types(void)
+{
+    type_register_static(&stmp3770_clkctrl_info);
+}
+
+type_init(stmp3770_clkctrl_register_types)

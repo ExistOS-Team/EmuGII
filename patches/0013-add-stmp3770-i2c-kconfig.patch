@@ -1,0 +1,23 @@
+diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
+index d9a8b9a..e8f427c 100644
+--- a/hw/arm/Kconfig
++++ b/hw/arm/Kconfig
+@@ -529,6 +529,7 @@ config STMP3770
+     select STMP3770_APBX_DMA
+     select STMP3770_PINCTRL
+     select STMP3770_GPMI
++    select STMP3770_I2C
+     select STMP3770_BCH
+     select STMP3770_TIMER
+     select STMP3770_OCOTP
+
+diff --git a/hw/i2c/Kconfig b/hw/i2c/Kconfig
+index a111111..b222222 100644
+--- a/hw/i2c/Kconfig
++++ b/hw/i2c/Kconfig
+@@ -64,2 +64,5 @@ config SBCON_I2C
+ config PCA954X
+     bool
++
++config STMP3770_I2C
++    bool

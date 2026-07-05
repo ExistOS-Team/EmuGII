@@ -1,0 +1,9 @@
+diff --git a/hw/rtc/meson.build b/hw/rtc/meson.build
+index 1111111..2222222 100644
+--- a/hw/rtc/meson.build
++++ b/hw/rtc/meson.build
+@@ -14,3 +14,4 @@
+ system_ss.add(when: 'CONFIG_ALLWINNER_H3', if_true: files('allwinner-rtc.c'))
+ system_ss.add(when: 'CONFIG_MC146818RTC', if_true: files('mc146818rtc.c'))
+ system_ss.add(when: 'CONFIG_RS5C372_RTC', if_true: files('rs5c372.c'))
++system_ss.add(when: 'CONFIG_STMP3770_RTC', if_true: files('stmp3770_rtc.c'))

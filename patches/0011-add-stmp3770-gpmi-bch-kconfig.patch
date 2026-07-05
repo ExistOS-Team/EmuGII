@@ -1,0 +1,35 @@
+diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
+index ce8f427..d9a8b9a 100644
+--- a/hw/arm/Kconfig
++++ b/hw/arm/Kconfig
+@@ -527,6 +527,8 @@ config STMP3770
+     select STMP3770_APBH_DMA
+     select STMP3770_APBX_DMA
+     select STMP3770_PINCTRL
++    select STMP3770_GPMI
++    select STMP3770_BCH
+     select STMP3770_TIMER
+     select STMP3770_OCOTP
+     select STMP3770_RTC
+
+diff --git a/hw/block/Kconfig b/hw/block/Kconfig
+index a111111..b222222 100644
+--- a/hw/block/Kconfig
++++ b/hw/block/Kconfig
+@@ -33,2 +33,5 @@
+ config SWIM
+     bool
++
++config STMP3770_GPMI
++    bool
+
+diff --git a/hw/misc/Kconfig b/hw/misc/Kconfig
+index a111111..b222222 100644
+--- a/hw/misc/Kconfig
++++ b/hw/misc/Kconfig
+@@ -287,2 +287,5 @@
+ config XLNX_VERSAL_TRNG
+     bool
++
++config STMP3770_BCH
++    bool

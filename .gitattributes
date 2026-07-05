@@ -1,0 +1,26 @@
+# Enforce LF line endings for all text files in this repo.
+# ThirdParty/qemu is a submodule and is not affected by this file.
+* text=auto eol=lf
+
+# Explicitly treat common source/build files as text.
+*.c text eol=lf
+*.h text eol=lf
+*.patch text eol=lf
+*.ld text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+SConstruct text eol=lf
+SConscript text eol=lf
+# Binary files should never be modified.
+*.bin binary
+*.elf binary
+*.exe binary
+*.img binary
+*.png binary
+*.jpg binary
+*.pdf binary
+tests/ExistOS/flash.initial.bin filter=lfs diff=lfs merge=lfs -text

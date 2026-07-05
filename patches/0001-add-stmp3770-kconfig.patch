@@ -1,0 +1,67 @@
+diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
+index 2aa4b5d..ce8f427 100644
+--- a/hw/arm/Kconfig
++++ b/hw/arm/Kconfig
+@@ -524,6 +524,46 @@
+     select WDT_IMX2
+     select LAN9118
+
++config STMP3770
++    bool
++    default y
++    depends on TCG && ARM
++    select SERIAL_MM
++    select PL011
++    select PTIMER
++    select UNIMP
++    select STMP3770_APBH_DMA
++    select STMP3770_APBX_DMA
++    select STMP3770_PINCTRL
++    select STMP3770_TIMER
++    select STMP3770_OCOTP
++    select STMP3770_RTC
++    select STMP3770_POWER
++    select STMP3770_LRADC
++
++config STMP3770_PINCTRL
++    bool
++
++config STMP3770_TIMER
++    bool
++
++config STMP3770_OCOTP
++    bool
++
++config STMP3770_RTC
++    bool
++
++config STMP3770_POWER
++    bool
++
++config STMP3770_LRADC
++    bool
++
++config STMP3770_BOARD
++    bool
++    default y
++    depends on TCG && ARM
++    select STMP3770
+ config FSL_IMX6
+     bool
+     imply PCIE_DEVICES
+
+
+diff --git a/hw/dma/Kconfig b/hw/dma/Kconfig
+index a111111..b222222 100644
+--- a/hw/dma/Kconfig
++++ b/hw/dma/Kconfig
+@@ -31,3 +31,9 @@
+ config XLNX_CSU_DMA
+     bool
+     select REGISTER
++
++config STMP3770_APBH_DMA
++    bool
++
++config STMP3770_APBX_DMA
++    bool

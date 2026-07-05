@@ -1,0 +1,9 @@
+diff --git a/hw/audio/meson.build b/hw/audio/meson.build
+index 1111111..2222222 100644
+--- a/hw/audio/meson.build
++++ b/hw/audio/meson.build
+@@ -16,3 +16,5 @@ system_ss.add(when: 'CONFIG_WM8750', if_true: files('wm8750.c'))
+ system_ss.add(when: ['CONFIG_VIRTIO_SND', 'CONFIG_VIRTIO'], if_true: files('virtio-snd.c'))
+ system_ss.add(when: ['CONFIG_VIRTIO_SND', 'CONFIG_VIRTIO', 'CONFIG_VIRTIO_PCI'], if_true: files('virtio-snd-pci.c'))
++system_ss.add(when: 'CONFIG_STMP3770_AUDIO_DAC', if_true: files('stmp3770_audio.c'))
++system_ss.add(when: 'CONFIG_STMP3770_AUDIO_ADC', if_true: files('stmp3770_audio.c'))

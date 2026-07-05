@@ -1,0 +1,17 @@
+diff --git a/hw/misc/meson.build b/hw/misc/meson.build
+index b1d8d8e..8e9989e 100644
+--- a/hw/misc/meson.build
++++ b/hw/misc/meson.build
+@@ -70,6 +70,12 @@ system_ss.add(when: 'CONFIG_IMX', if_true: files(
+   'imx_ccm.c',
+   'imx_rngc.c',
+ ))
++system_ss.add(when: 'CONFIG_STMP3770', if_true: files(
++  'stmp3770_clkctrl.c',
++  'stmp3770_digctl.c',
++  'stmp3770_lradc.c',
++  'stmp3770_power.c',
++))
+ system_ss.add(when: 'CONFIG_MAX78000_AES', if_true: files('max78000_aes.c'))
+ system_ss.add(when: 'CONFIG_MAX78000_GCR', if_true: files('max78000_gcr.c'))
+ system_ss.add(when: 'CONFIG_MAX78000_ICC', if_true: files('max78000_icc.c'))

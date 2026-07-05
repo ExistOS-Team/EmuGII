@@ -1,0 +1,8 @@
+diff --git a/hw/block/meson.build b/hw/block/meson.build
+index a111111..b222222 100644
+--- a/hw/block/meson.build
++++ b/hw/block/meson.build
+@@ -34,2 +34,3 @@
+
+ subdir('dataplane')
++system_ss.add(when: 'CONFIG_STMP3770_GPMI', if_true: files('stmp3770_gpmi.c'))

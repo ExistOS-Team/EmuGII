@@ -1,0 +1,60 @@
+# 构建输出
+build/
+*.o
+*.a
+*.so
+*.dll
+*.exe
+
+# SCons 相关
+.sconsign.dblite
+.sconf_temp/
+config.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.claude
+
+# QEMU 相关
+*.qcow2
+*.img
+
+# 日志
+*.log
+
+# 项目特定
+/References
+/DevDocs
+.opencode
+.omo
+CLAUDE.md
+
+# 临时/一次性脚本与 QEMU 配置产物
+/.gdbinit
+/config-host.mak
+/config-meson.cross
+/config.log
+/config-temp/
+/Makefile
+/Makefile.prereqs
+/test_raw*.py
+/unimp.log
+/pc-bios/
+/python/
+/pyvenv/
+/scripts/
+/docs/
+/.codegraph/

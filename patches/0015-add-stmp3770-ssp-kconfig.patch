@@ -1,0 +1,23 @@
+diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
+index e8f427c..f9a8b9a 100644
+--- a/hw/arm/Kconfig
++++ b/hw/arm/Kconfig
+@@ -530,6 +530,7 @@ config STMP3770
+     select STMP3770_PINCTRL
+     select STMP3770_GPMI
+     select STMP3770_I2C
++    select STMP3770_SSP
+     select STMP3770_BCH
+     select STMP3770_TIMER
+     select STMP3770_OCOTP
+
+diff --git a/hw/ssi/Kconfig b/hw/ssi/Kconfig
+index a111111..b222222 100644
+--- a/hw/ssi/Kconfig
++++ b/hw/ssi/Kconfig
+@@ -34,2 +34,5 @@ config ALLWINNER_A10_SPI
+     bool
+     select SSI
++
++config STMP3770_SSP
++    bool

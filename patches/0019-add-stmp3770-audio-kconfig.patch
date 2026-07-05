@@ -1,0 +1,27 @@
+diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
+index a111111..b222222 100644
+--- a/hw/arm/Kconfig
++++ b/hw/arm/Kconfig
+@@ -538,6 +538,8 @@ config STMP3770
+     select STMP3770_SSP
+     select STMP3770_LCDIF
+     select STMP3770_BCH
++    select STMP3770_AUDIO_DAC
++    select STMP3770_AUDIO_ADC
+     select STMP3770_TIMER
+     select STMP3770_OCOTP
+
+diff --git a/hw/audio/Kconfig b/hw/audio/Kconfig
+index a111111..b222222 100644
+--- a/hw/audio/Kconfig
++++ b/hw/audio/Kconfig
+@@ -58,3 +58,10 @@ config VIRTIO_SND
+     default y
+     depends on VIRTIO
++
++config STMP3770_AUDIO_DAC
++    bool
++
++config STMP3770_AUDIO_ADC
++    bool
++

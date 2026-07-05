@@ -1,0 +1,23 @@
+diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
+--- a/hw/arm/Kconfig
++++ b/hw/arm/Kconfig
+@@ -538,6 +538,7 @@ config STMP3770
+     select STMP3770_GPMI
+     select STMP3770_I2C
+     select STMP3770_SSP
++    select STMP3770_LCDIF
+     select STMP3770_BCH
+     select STMP3770_TIMER
+     select STMP3770_OCOTP
+
+diff --git a/hw/display/Kconfig b/hw/display/Kconfig
+--- a/hw/display/Kconfig
++++ b/hw/display/Kconfig
+@@ -149,3 +149,7 @@ config MAC_PVG_PCI
+     bool
+     depends on MAC_PVG && PCI
+     default y if PCI_DEVICES
++
++config STMP3770_LCDIF
++    bool
++    select FRAMEBUFFER

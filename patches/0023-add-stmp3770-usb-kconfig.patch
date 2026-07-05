@@ -1,0 +1,25 @@
+diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
+--- a/hw/arm/Kconfig
++++ b/hw/arm/Kconfig
+@@ -544,6 +544,8 @@ config STMP3770
+     select STMP3770_AUDIO_DAC
+     select STMP3770_AUDIO_ADC
+     select STMP3770_TIMER
++    select STMP3770_USBPHY
++    select STMP3770_USB
+     select STMP3770_PWM
+     select STMP3770_OCOTP
+     select STMP3770_RTC
+
+diff --git a/hw/usb/Kconfig b/hw/usb/Kconfig
+--- a/hw/usb/Kconfig
++++ b/hw/usb/Kconfig
+@@ -147,3 +147,9 @@ config USB_CHIPIDEA
+     bool
+     select USB_EHCI_SYSBUS
++
++config STMP3770_USBPHY
++    bool
++
++config STMP3770_USB
++    bool

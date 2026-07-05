@@ -1,0 +1,9 @@
+diff --git a/hw/dma/meson.build b/hw/dma/meson.build
+index a111111..b222222 100644
+--- a/hw/dma/meson.build
++++ b/hw/dma/meson.build
+@@ -13,3 +13,5 @@ system_ss.add(when: 'CONFIG_RASPI', if_true: files('bcm2835_dma.c'))
+ system_ss.add(when: 'CONFIG_SIFIVE_PDMA', if_true: files('sifive_pdma.c'))
+ system_ss.add(when: 'CONFIG_XLNX_CSU_DMA', if_true: files('xlnx_csu_dma.c'))
++system_ss.add(when: 'CONFIG_STMP3770_APBH_DMA', if_true: files('stmp3770_dma.c'))
++system_ss.add(when: 'CONFIG_STMP3770_APBX_DMA', if_true: files('stmp3770_dma.c'))

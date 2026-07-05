@@ -1,0 +1,21 @@
+diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
+--- a/hw/arm/Kconfig
++++ b/hw/arm/Kconfig
+@@ -540,6 +540,7 @@ config STMP3770
+     select STMP3770_SSP
+     select STMP3770_BCH
+     select STMP3770_TIMER
++    select STMP3770_PWM
+     select STMP3770_OCOTP
+     select STMP3770_RTC
+
+diff --git a/hw/timer/Kconfig b/hw/timer/Kconfig
+--- a/hw/timer/Kconfig
++++ b/hw/timer/Kconfig
+@@ -65,3 +65,6 @@ config STMP3770_TIMER
+
+ config AVR_TIMER16
+     bool
++
++config STMP3770_PWM
++    bool

@@ -1,0 +1,9 @@
+diff --git a/hw/i2c/meson.build b/hw/i2c/meson.build
+index 1111111..2222222 100644
+--- a/hw/i2c/meson.build
++++ b/hw/i2c/meson.build
+@@ -18,3 +18,4 @@ i2c_ss.add(when: 'CONFIG_PCA954X', if_true: files('i2c_mux_pca954x.c'))
+ i2c_ss.add(when: 'CONFIG_PMBUS', if_true: files('pmbus_device.c'))
+ i2c_ss.add(when: 'CONFIG_BCM2835_I2C', if_true: files('bcm2835_i2c.c'))
++i2c_ss.add(when: 'CONFIG_STMP3770_I2C', if_true: files('stmp3770_i2c.c'))
+ system_ss.add_all(when: 'CONFIG_I2C', if_true: i2c_ss)
