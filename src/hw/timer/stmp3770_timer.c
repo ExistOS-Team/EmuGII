@@ -280,11 +280,7 @@ static uint64_t stmp3770_timer_read(void *opaque, hwaddr offset, unsigned size)
         break;
     }
 
-    idx = timctrl_idx_from_base(base);
-    if (idx >= 0 && idx < STMP3770_NUM_TIMERS) {
-        return s->timer[idx].timctrl;
-    }
-
+    /* Check TIMCOUNT first (0x030, 0x050, ...) before TIMCTRL to avoid overlap */
     idx = timcount_idx_from_base(base);
     if (idx >= 0 && idx < STMP3770_NUM_TIMERS) {
         STMP3770TimerChannel *t = &s->timer[idx];
@@ -295,6 +291,11 @@ static uint64_t stmp3770_timer_read(void *opaque, hwaddr offset, unsigned size)
         ptimer_transaction_commit(t->ptimer);
 
         return ((running & 0xFFFF) << 16) | (t->fixed_count & 0xFFFF);
+    }
+
+    idx = timctrl_idx_from_base(base);
+    if (idx >= 0 && idx < STMP3770_NUM_TIMERS) {
+        return s->timer[idx].timctrl;
     }
 
     qemu_log_mask(LOG_GUEST_ERROR,
@@ -409,15 +410,16 @@ static void stmp3770_timer_write(void *opaque, hwaddr offset,
         return;
     }
 
-    idx = timctrl_idx_from_base(base);
-    if (idx >= 0 && idx < STMP3770_NUM_TIMERS) {
-        stmp3770_timer_write_timctrl(s, idx, sct, (uint32_t)value);
-        return;
-    }
-
+    /* Check TIMCOUNT first (0x030, 0x050, ...) before TIMCTRL to avoid overlap */
     idx = timcount_idx_from_base(base);
     if (idx >= 0 && idx < STMP3770_NUM_TIMERS) {
         stmp3770_timer_write_timcount(s, idx, (uint32_t)value);
+        return;
+    }
+
+    idx = timctrl_idx_from_base(base);
+    if (idx >= 0 && idx < STMP3770_NUM_TIMERS) {
+        stmp3770_timer_write_timctrl(s, idx, sct, (uint32_t)value);
         return;
     }
 
