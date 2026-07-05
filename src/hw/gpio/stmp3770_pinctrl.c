@@ -183,10 +183,32 @@ static void stmp3770_pinctrl_reset(DeviceState *dev)
     for (i = 0; i < ARRAY_SIZE(s->muxsel); i++) {
         s->muxsel[i] = 0;
     }
+
+    /*
+     * Drive strength configuration based on ExistOS BSP analysis.
+     * Each register controls 16 pins (2 bits per pin):
+     *   00 = 4mA, 01 = 8mA, 10 = 12mA, 11 = 16mA
+     *
+     * Default: 4mA for all pins (0x00000000)
+     * GPMI NAND pins (Bank0 Pin 0-7): need 8mA (ExistOS stmp_board.cpp:120-196)
+     */
     for (i = 0; i < ARRAY_SIZE(s->drive); i++) {
-        /* Default voltage = 3.3V, drive = 4mA (0) */
-        s->drive[i] = 0x55555555;
+        s->drive[i] = 0x00000000;       /* Default 4mA for all */
     }
+
+    /* DRIVE0: Bank0 Pin 0-7 (GPMI D0-D7)
+     * Set MA=1 (8mA) for GPMI data lines
+     * Bits [15:0] control Pin 0-7 (2 bits each)
+     */
+    s->drive[0] = 0x00005555;           /* Pin 0-7: 8mA, Pin 8-15: 4mA */
+
+    /* DRIVE1: Bank0 Pin 16-23 (includes GPMI control signals)
+     * Pin 16-19: GPMI CLE/ALE/WRN/RDN also need 8mA
+     * Pin 22-25: GPMI RDY/CS/WP/RST also 8mA
+     */
+    s->drive[1] = 0x00000055;           /* Pin 16-19: 8mA */
+    s->drive[2] = 0x00005555;           /* Pin 22-25 (in next reg): 8mA */
+
     for (i = 0; i < ARRAY_SIZE(s->pull); i++) {
         s->pull[i] = 0;
     }

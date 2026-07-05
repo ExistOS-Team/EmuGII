@@ -69,6 +69,12 @@
 #define FRAC_CLKGATEPIX         (1 << 23)
 #define FRAC_PIXFRAC_MASK       (0x3F << 16)
 
+/* CLKSEQ register bits */
+#define CLKSEQ_BYPASS_CPU       (1 << 7)
+#define CLKSEQ_BYPASS_SSP       (1 << 5)
+#define CLKSEQ_BYPASS_GPMI      (1 << 4)
+#define CLKSEQ_BYPASS_PIX       (1 << 1)
+
 /* Version register */
 #define VERSION_MAJOR           0x02
 #define VERSION_MINOR           0x01
@@ -305,21 +311,44 @@ static void stmp3770_clkctrl_reset(DeviceState *dev)
 {
     STMP3770CLKCTRLState *s = STMP3770_CLKCTRL(dev);
 
-    /* Reset to defaults - most come up from XTAL at 24 MHz */
-    s->pllctrl0 = 0;
+    /*
+     * Reset values based on ExistOS BSP analysis and real STMP3770 behavior.
+     * CPU starts at 24MHz XTAL, firmware enables PLL and switches to high-freq.
+     */
+
+    /* PLL disabled at reset */
+    s->pllctrl0 = 0;                    /* POWER=0, PLL off */
     s->pllctrl1 = 0;
-    s->cpu = 0x00010001;      /* Default dividers */
-    s->hbus = 0x00000003;     /* HBUS div 3 */
-    s->xbus = 0x00000001;     /* XBUS div 1 */
+
+    /* CPU clock from 24MHz XTAL bypass */
+    s->cpu = 0x00010001;                /* DIV_CPU=1, DIV_CPU_FRAC=1 */
+    s->hbus = 0x00000003;               /* DIV=3 → 24MHz/3=8MHz HBUS */
+    s->xbus = 0x00000001;               /* DIV=1 */
     s->xtal = 0;
-    s->pix = 0;
-    s->ssp = 0;
-    s->gpmi = 0;
+
+    /* Peripheral clocks */
+    s->pix = 0x00000001;                /* DIV=1, will use bypass or PLL/DIV */
+    s->ssp = 0x00000001;                /* DIV=1 */
+    s->gpmi = 0x00000001;               /* DIV=1 (ExistOS sets to 2 → 240MHz) */
     s->spdif = 0;
-    s->frac = 0x92929292;     /* Default PFD values */
-    s->clkseq = 0xFFFF;       /* All clocks from XTAL */
+
+    /* Phase Fractional Dividers (PFD)
+     * Bits 7: CLKGATECPU=1 (CPU clock gated until firmware ungates)
+     * Bits 0-5: CPUFRAC=18 (default, 480*18/18=480MHz when enabled)
+     * Similar for IO and PIX domains
+     */
+    s->frac = 0x92929292;               /* CPU/IO/PIX all gated, frac=18/18/18 */
+
+    /* Clock sequencer: all clocks bypass to XTAL
+     * Bit 7: BYPASS_CPU=1 (use 24MHz XTAL, not PLL)
+     * Bit 5: BYPASS_SSP=1
+     * Bit 4: BYPASS_GPMI=1
+     * Bit 1: BYPASS_PIX=1
+     */
+    s->clkseq = 0x000000B2;             /* Bypass CPU/SSP/GPMI/PIX to XTAL */
     s->reset = 0;
 
+    /* Clock state */
     s->pll_powered = false;
     s->pll_locked = false;
 }

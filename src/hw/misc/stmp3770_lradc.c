@@ -176,7 +176,24 @@ static uint64_t lradc_read(void *opaque, hwaddr offset, unsigned size)
         ret = STATUS_CHANNEL_PRESENT_MASK;
         break;
     case REG_CH0 ... REG_CH7:
-        ret = s->channel[(base - REG_CH0) >> 4];
+        {
+            int ch = (base - REG_CH0) >> 4;
+            /*
+             * Channel 7: Battery voltage (based on ExistOS BSP analysis)
+             * ExistOS stmp_power.cpp:158-170 expects:
+             *   ADC_val = (Vbatt / 4) / 3.3 * 4095
+             *   For 3.7V battery: ADC ≈ 460
+             *   For 0V (disconnected): ADC ≈ 2748 (ExistOS log shows this)
+             *
+             * Simulate disconnected battery (USB powered):
+             */
+            if (ch == 7) {
+                ret = 2748;  /* Match ExistOS observation: "adc:2748" */
+            } else {
+                /* Channels 0-6: Keyboard matrix, return mid-range */
+                ret = s->channel[ch];
+            }
+        }
         break;
     case REG_DELAY0:
         ret = s->delay[0];
