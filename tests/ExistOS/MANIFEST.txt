@@ -1,8 +1,8 @@
 ExistOS boot fixture files
 
 Source paths:
-- hypervisor-rom.bin: D:\Projects\ExistOS-For-HP39GII\build\Hypervisor\rom.bin
-- flash.initial.bin: build\verify\existos_system_nand.bin, generated during EmuGII ExistOS boot verification
+- hypervisor-rom.bin: copied from the ExistOS Hypervisor build output
+- flash.initial.bin: generated during EmuGII ExistOS boot verification
 
 Files:
 - hypervisor-rom.bin

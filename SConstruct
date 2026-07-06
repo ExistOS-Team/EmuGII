@@ -2,8 +2,11 @@
 # 用于构建 STMP3770 QEMU 模拟器
 
 import os
+import shlex
 import shutil
 import subprocess
+
+from build_helpers import resolve_bash, to_msys_path
 
 # 项目路径
 PROJECT_ROOT = Dir('#').abspath
@@ -195,22 +198,19 @@ def configure_qemu(target, source, env):
 
     print(">>> 配置 QEMU...")
 
-    # 将 Windows 路径转换为 MSYS2 路径格式
-    # D:\Projects\... -> /d/Projects/...
-    import re
-    build_dir_unix = os.path.abspath(build_dir).replace('\\', '/')
-    # 转换盘符: D:/ -> /d/
-    build_dir_unix = re.sub(r'^([A-Za-z]):', r'/\1', build_dir_unix).lower()
+    build_dir_unix = to_msys_path(os.path.abspath(build_dir))
 
     print(f"  使用路径: {build_dir_unix}")
 
-    # 使用 bash 并显式设置 Unix 风格路径
-    qemu_dir_unix = os.path.abspath(qemu_dir).replace('\\', '/')
-    qemu_dir_unix = re.sub(r'^([A-Za-z]):', r'/\1', qemu_dir_unix).lower()
+    qemu_dir_unix = to_msys_path(os.path.abspath(qemu_dir))
+    bash = resolve_bash(env['ENV'])
 
     configure_cmd = [
-        r'D:\Tools\msys64\usr\bin\bash.exe', '-lc',
-        f'cd "{build_dir_unix}" && CC=gcc CXX=g++ "{qemu_dir_unix}/configure" --target-list=arm-softmmu --enable-debug --disable-werror --disable-vhost-user --disable-libvduse --disable-guest-agent'
+        bash, '-lc',
+        'cd {} && CC=gcc CXX=g++ {} --target-list=arm-softmmu --enable-debug --disable-werror --disable-vhost-user --disable-libvduse --disable-guest-agent'.format(
+            shlex.quote(build_dir_unix),
+            shlex.quote(f'{qemu_dir_unix}/configure')
+        )
     ]
 
     result = subprocess.run(
@@ -239,14 +239,14 @@ def build_qemu(target, source, env):
     import multiprocessing
     nproc = multiprocessing.cpu_count()
 
-    # 转换为 Unix 路径格式(用于 bash -c)
-    import re
-    build_dir_unix = os.path.abspath(build_dir).replace('\\', '/')
-    build_dir_unix = re.sub(r'^([A-Za-z]):', r'/\1', build_dir_unix).lower()
+    build_dir_unix = to_msys_path(os.path.abspath(build_dir))
+    bash = resolve_bash(env['ENV'])
 
     result = subprocess.run(
-        [r'D:\Tools\msys64\usr\bin\bash.exe', '-lc',
-         f'cd "{build_dir_unix}" && ninja qemu-system-arm.exe -j{nproc}'],
+        [
+            bash, '-lc',
+            f'cd {shlex.quote(build_dir_unix)} && ninja qemu-system-arm.exe -j{nproc}'
+        ],
         env=env['ENV']
     )
 

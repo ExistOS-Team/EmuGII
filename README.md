@@ -51,9 +51,10 @@ EmuGII/
 
 ## 构建
 
-当前 `SConstruct` 面向本机 Windows/MSYS2 环境，QEMU configure/build 阶段会调用
-`D:\Tools\msys64\usr\bin\bash.exe`。如果 MSYS2 安装路径不同，需要先调整
-`SConstruct`。
+当前 `SConstruct` 面向 Windows/MSYS2 环境，QEMU configure/build 阶段需要通过
+MSYS2 bash 执行 QEMU 的 POSIX shell 构建脚本。默认会从 `PATH` 查找 `bash`；
+如果 VSCode/终端没有继承 MSYS2 环境，可以设置 `EMUGII_BASH` 指向本机
+`bash.exe`，或使用兼容的 `MSYS2_BASH`。
 
 MSYS2 依赖：
 

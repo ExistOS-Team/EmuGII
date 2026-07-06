@@ -44,8 +44,8 @@ CLAUDE.md
 
 # 临时/一次性脚本与 QEMU 配置产物
 /.gdbinit
-/config-host.mak
-/config-meson.cross
+config-host.mak
+config-meson.cross
 /config.log
 /config-temp/
 /Makefile
