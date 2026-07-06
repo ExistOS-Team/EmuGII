@@ -14,7 +14,10 @@ class BuildHelperTests(unittest.TestCase):
             bash = Path(tmp) / ("bash.exe" if os.name == "nt" else "bash")
             bash.write_text("", encoding="utf-8")
 
-            resolved = resolve_bash({"EMUGII_BASH": str(bash), "PATH": ""})
+            resolved = resolve_bash(
+                {"EMUGII_BASH": str(bash), "PATH": ""},
+                is_compatible=lambda path: path == str(bash),
+            )
 
             self.assertEqual(resolved, str(bash))
 
@@ -24,9 +27,40 @@ class BuildHelperTests(unittest.TestCase):
             bash = Path(tmp) / bash_name
             bash.write_text("", encoding="utf-8")
 
-            resolved = resolve_bash({"PATH": tmp})
+            resolved = resolve_bash(
+                {"PATH": tmp},
+                is_compatible=lambda path: Path(path).resolve() == bash.resolve(),
+            )
 
             self.assertEqual(Path(resolved).resolve(), bash.resolve())
+
+    def test_path_lookup_skips_incompatible_bash_candidates(self):
+        with tempfile.TemporaryDirectory() as bad_tmp:
+            with tempfile.TemporaryDirectory() as good_tmp:
+                bash_name = "bash.exe" if os.name == "nt" else "bash"
+                bad_bash = Path(bad_tmp) / bash_name
+                good_bash = Path(good_tmp) / bash_name
+                bad_bash.write_text("", encoding="utf-8")
+                good_bash.write_text("", encoding="utf-8")
+
+                resolved = resolve_bash(
+                    {"PATH": os.pathsep.join([bad_tmp, good_tmp])},
+                    is_compatible=lambda path: Path(path).resolve()
+                    == good_bash.resolve(),
+                )
+
+                self.assertEqual(Path(resolved).resolve(), good_bash.resolve())
+
+    def test_env_override_rejects_incompatible_bash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bash = Path(tmp) / ("bash.exe" if os.name == "nt" else "bash")
+            bash.write_text("", encoding="utf-8")
+
+            with self.assertRaisesRegex(FileNotFoundError, "not MSYS2/MINGW"):
+                resolve_bash(
+                    {"EMUGII_BASH": str(bash), "PATH": ""},
+                    is_compatible=lambda path: False,
+                )
 
     def test_windows_drive_path_converts_to_msys_path_without_lowercasing_rest(self):
         windows_path = "D:" + "\\Projects\\EmuGII\\build\\qemu"
