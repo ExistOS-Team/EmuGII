@@ -99,15 +99,12 @@ def copy_tree(src, dst):
 
 # 辅助函数：应用补丁
 def apply_patches(target, source, env):
-    """复制源文件并应用 patches/ 下尚未应用的补丁到 QEMU 源码"""
+    """重置 QEMU 工作树、应用构建补丁，并同步本仓源码到 QEMU 源树"""
     # source[0] 是 .copied 标记文件，QEMU 目录是其父目录
     qemu_dir = os.path.dirname(str(source[0]))
     tool_env, _ = prepare_bash_env(env['ENV'])
     qemu_dir_unix = to_msys_path(os.path.abspath(qemu_dir))
     patch_exe = find_executable('patch', tool_env['PATH'])
-
-    # 复制我们的源文件
-    print(">>> 复制 STMP3770 源文件到 QEMU 树...")
 
     files_to_copy = [
         ('src/include/hw/arm/stmp3770.h', 'include/hw/arm/stmp3770.h'),
@@ -150,13 +147,6 @@ def apply_patches(target, source, env):
         ('src/hw/i2c/stmp3770_i2c.c', 'hw/i2c/stmp3770_i2c.c'),
         ('src/hw/ssi/stmp3770_ssp.c', 'hw/ssi/stmp3770_ssp.c'),
     ]
-
-    for src_file, dst_file in files_to_copy:
-        src_path = os.path.join(PROJECT_ROOT, src_file)
-        dst_path = os.path.join(qemu_dir, dst_file)
-        os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-        shutil.copy2(src_path, dst_path)
-        print(f"  已复制: {dst_file}")
 
     # 将 QEMU 工作树统一归一化为 LF，避免 Windows 下的 CRLF 导致补丁/编译异常
     print(">>> 归一化 QEMU 源码行尾到 LF...")
@@ -201,6 +191,16 @@ def apply_patches(target, source, env):
             return 1
 
         print(f"  成功: {patch_file}")
+
+    # 构建补丁应用完成后，再同步我们维护的 STMP3770 源文件，
+    # 避免前面的 git checkout 覆盖本仓最新实现。
+    print(">>> 同步 STMP3770 源文件到 QEMU 树...")
+    for src_file, dst_file in files_to_copy:
+        src_path = os.path.join(PROJECT_ROOT, src_file)
+        dst_path = os.path.join(qemu_dir, dst_file)
+        os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+        shutil.copy2(src_path, dst_path)
+        print(f"  已复制: {dst_file}")
 
     with open(str(target[0]), 'w') as f:
         f.write("Patched\n")
@@ -481,7 +481,7 @@ configured_qemu = env.Command(
 # 4. 编译 QEMU
 built_qemu = env.Command(
     os.path.join(QEMU_BUILDDIR, '.built'),
-    configured_qemu,
+    [configured_qemu, patched_qemu],
     build_qemu
 )
 

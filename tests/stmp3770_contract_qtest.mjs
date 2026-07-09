@@ -16,6 +16,7 @@ const qemuBinary = process.env.EMUGII_QEMU_BINARY ?? path.join(
 const ICOLL_BASE = 0x80000000;
 const PINCTRL_BASE = 0x80018000;
 const LCDIF_BASE = 0x80030000;
+const POWER_BASE = 0x80044000;
 const RTC_BASE = 0x8005c000;
 
 class QTestMachine {
@@ -246,10 +247,66 @@ async function testPinctrlBank3Absent() {
   });
 }
 
+async function testPowerVersionAndResetContract() {
+  await withMachine(async (machine) => {
+    const version = await machine.readl(POWER_BASE + 0x110);
+    const resetBefore = await machine.readl(POWER_BASE + 0x0e0);
+
+    assert.equal(version, 0x02000000, `POWER VERSION should report v2.0 at 0x110: got 0x${version.toString(16)}`);
+    assert.equal(resetBefore, 0, `POWER RESET should reset to 0: got 0x${resetBefore.toString(16)}`);
+
+    await machine.writel(POWER_BASE + 0x0e0, 0x00000001);
+    const resetWithoutUnlock = await machine.readl(POWER_BASE + 0x0e0);
+    assert.equal(
+      resetWithoutUnlock,
+      0,
+      `POWER RESET low bits must ignore writes without unlock key: got 0x${resetWithoutUnlock.toString(16)}`,
+    );
+
+    await machine.writel(POWER_BASE + 0x0e0, 0x3e770001);
+    const resetWithUnlock = await machine.readl(POWER_BASE + 0x0e0);
+    assert.equal(
+      resetWithUnlock,
+      0x00000001,
+      `POWER RESET should accept unlocked write to PWD bit: got 0x${resetWithUnlock.toString(16)}`,
+    );
+  });
+}
+
+async function testPowerResetValues() {
+  await withMachine(async (machine) => {
+    const ctrl = await machine.readl(POWER_BASE + 0x000);
+    const v5ctrl = await machine.readl(POWER_BASE + 0x010);
+    const charge = await machine.readl(POWER_BASE + 0x030);
+    const vddd = await machine.readl(POWER_BASE + 0x040);
+    const vdda = await machine.readl(POWER_BASE + 0x050);
+    const vddio = await machine.readl(POWER_BASE + 0x060);
+    const dclimits = await machine.readl(POWER_BASE + 0x090);
+    const loopctrl = await machine.readl(POWER_BASE + 0x0a0);
+    const speed = await machine.readl(POWER_BASE + 0x0c0);
+    const batt = await machine.readl(POWER_BASE + 0x0d0);
+    const sts = await machine.readl(POWER_BASE + 0x0b0);
+
+    assert.equal(ctrl, 0x40040024, `POWER CTRL reset mismatch: got 0x${ctrl.toString(16)}`);
+    assert.equal(v5ctrl, 0x00000100, `POWER 5VCTRL reset mismatch: got 0x${v5ctrl.toString(16)}`);
+    assert.equal(charge, 0x00010000, `POWER CHARGE reset mismatch: got 0x${charge.toString(16)}`);
+    assert.equal(vddd, 0x00310710, `POWER VDDDCTRL reset mismatch: got 0x${vddd.toString(16)}`);
+    assert.equal(vdda, 0x0000170a, `POWER VDDACTRL reset mismatch: got 0x${vdda.toString(16)}`);
+    assert.equal(vddio, 0x0000170c, `POWER VDDIOCTRL reset mismatch: got 0x${vddio.toString(16)}`);
+    assert.equal(dclimits, 0x00040c5f, `POWER DCLIMITS reset mismatch: got 0x${dclimits.toString(16)}`);
+    assert.equal(loopctrl, 0x00000021, `POWER LOOPCTRL reset mismatch: got 0x${loopctrl.toString(16)}`);
+    assert.equal(speed, 0x00000000, `POWER SPEED reset mismatch: got 0x${speed.toString(16)}`);
+    assert.equal(batt, 0x00000020, `POWER BATTMONITOR reset mismatch: got 0x${batt.toString(16)}`);
+    assert.equal(sts, 0x80000000, `POWER STS reset mismatch: got 0x${sts.toString(16)}`);
+  });
+}
+
 const tests = [
   ['RTC 1ms IRQ routing', testRtc1MsecIrq],
   ['LCDIF CTRL1 interrupt layout', testLcdifCtrl1Layout],
   ['PINCTRL Bank 3 absence', testPinctrlBank3Absent],
+  ['POWER version and reset contract', testPowerVersionAndResetContract],
+  ['POWER reset values', testPowerResetValues],
 ];
 
 let failures = 0;

@@ -1,7 +1,7 @@
 /*
  * STMP3770 Power Supply (POWER)
  *
- * Based on STMP3770 Reference Manual Chapter 9
+ * Based on STMP3770 Reference Manual Chapter 29
  *
  * Features:
  * - Power control / 5V control / minimum power registers
@@ -31,7 +31,7 @@
 #include "qemu/module.h"
 #include "hw/misc/stmp3770_power.h"
 
-/* Register offsets (from Chapter 9.2 Register Map) */
+/* Register offsets (from Chapter 29.3 Register Map) */
 #define REG_CTRL                0x000
 #define REG_5VCTRL              0x010
 #define REG_MINPWR              0x020
@@ -49,34 +49,42 @@
 #define REG_RESET               0x0E0
 #define REG_DEBUG               0x0F0
 #define REG_SPECIAL             0x100
-#define REG_VERSION             0x130
+#define REG_VERSION             0x110
 
 #define REG_SPACING             0x10
 #define REG_SET                 0x4
 #define REG_CLR                 0x8
 #define REG_TOG                 0xC
 
-/* Number of 16-byte register slots we emulate (0x000..0x130 inclusive) */
-#define NUM_SLOTS               20
+/* Number of 16-byte register slots we emulate (0x000..0x110 inclusive) */
+#define NUM_SLOTS               18
 
-/* Status register defaults - report regulators ready and VBUS present */
-#define STS_DEFAULT             ( \
-    (1U << 15) | /* VBUSVALID_STATUS */ \
-    (1U << 16) | /* BVALID_STATUS    */ \
-    (1U << 17) | /* AVALID_STATUS    */ \
-    (1U << 9)  | /* LINREG_OK        */ \
-    (1U << 8)  | /* DC_OK            */ \
-    (1U << 4)  | /* VDD5V_GT_VDDIO   */ \
-    (1U << 3)  | /* AVALID           */ \
-    (1U << 2)  | /* BVALID           */ \
-    (1U << 1)    /* VBUSVALID        */ \
-)
+/* CTRL bits */
+#define CTRL_CLKGATE                (1U << 30)
+#define CTRL_POLARITY_LINREG_OK     (1U << 18)
+#define CTRL_POLARITY_VBUSVALID     (1U << 5)
+#define CTRL_POLARITY_VDD5V_GT_VDDIO (1U << 2)
 
-/* Speed register default status (DC-DC converter status field) */
-#define SPEED_DEFAULT           (0x10U << 16)
+/* REG_RESET write-unlock protocol */
+#define RESET_UNLOCK_MASK       0xFFFF0000U
+#define RESET_UNLOCK_VALUE      0x3E770000U
+#define RESET_WRITABLE_MASK     0x00000003U
 
-/* Power IP version (arbitrary non-zero placeholder) */
-#define VERSION_VALUE           0x01000000
+/* Register reset values per Reference Chapter 29 */
+#define CTRL_RESET              (CTRL_CLKGATE | CTRL_POLARITY_LINREG_OK | \
+                                 CTRL_POLARITY_VBUSVALID | \
+                                 CTRL_POLARITY_VDD5V_GT_VDDIO)
+#define V5CTRL_RESET            (1U << 8)
+#define CHARGE_RESET            (1U << 16)
+#define VDDDCTRL_RESET          0x00310710U
+#define VDDACTRL_RESET          0x0000170AU
+#define VDDIOCTRL_RESET         0x0000170CU
+#define DCLIMITS_RESET          0x00040C5FU
+#define LOOPCTRL_RESET          0x00000021U
+#define BATTMONITOR_RESET       (1U << 5)
+#define STS_RESET               (1U << 31)
+#define SPEED_RESET             0x00000000U
+#define VERSION_VALUE           0x02000000U
 
 #define TYPE_STMP3770_POWER "stmp3770-power"
 
@@ -109,8 +117,7 @@ static uint64_t stmp3770_power_read(void *opaque, hwaddr offset, unsigned size)
 
     switch (offset & ~0xFULL) {
     case REG_STS:
-        /* Keep sticky status bits from guest writes; OR in always-ready bits */
-        return (s->regs[slot] & ~STS_DEFAULT) | STS_DEFAULT;
+        return s->regs[slot];
 
     case REG_VERSION:
         return VERSION_VALUE;
@@ -158,6 +165,21 @@ static void stmp3770_power_write(void *opaque, hwaddr offset,
         }
         return;
 
+    case REG_RESET:
+        if (!is_set && !is_clr && !is_tog) {
+            if ((val & RESET_UNLOCK_MASK) == RESET_UNLOCK_VALUE) {
+                *target = val & RESET_WRITABLE_MASK;
+            }
+        } else if ((val & RESET_UNLOCK_MASK) == RESET_UNLOCK_VALUE) {
+            uint32_t bits = val & RESET_WRITABLE_MASK;
+            if (is_set) {
+                *target |= bits;
+            } else if (is_clr) {
+                *target &= ~bits;
+            }
+        }
+        return;
+
     default:
         break;
     }
@@ -187,8 +209,17 @@ static void stmp3770_power_reset(DeviceState *dev)
 
     memset(s->regs, 0, sizeof(s->regs));
 
-    s->regs[slot_from_offset(REG_STS)] = STS_DEFAULT;
-    s->regs[slot_from_offset(REG_SPEED)] = SPEED_DEFAULT;
+    s->regs[slot_from_offset(REG_CTRL)] = CTRL_RESET;
+    s->regs[slot_from_offset(REG_5VCTRL)] = V5CTRL_RESET;
+    s->regs[slot_from_offset(REG_CHARGE)] = CHARGE_RESET;
+    s->regs[slot_from_offset(REG_VDDDCTRL)] = VDDDCTRL_RESET;
+    s->regs[slot_from_offset(REG_VDDACTRL)] = VDDACTRL_RESET;
+    s->regs[slot_from_offset(REG_VDDIOCTRL)] = VDDIOCTRL_RESET;
+    s->regs[slot_from_offset(REG_DCLIMITS)] = DCLIMITS_RESET;
+    s->regs[slot_from_offset(REG_LOOPCTRL)] = LOOPCTRL_RESET;
+    s->regs[slot_from_offset(REG_STS)] = STS_RESET;
+    s->regs[slot_from_offset(REG_SPEED)] = SPEED_RESET;
+    s->regs[slot_from_offset(REG_BATTMONITOR)] = BATTMONITOR_RESET;
 }
 
 static void stmp3770_power_init(Object *obj)
