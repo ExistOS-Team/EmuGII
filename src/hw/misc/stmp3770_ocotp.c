@@ -26,6 +26,9 @@
 
 /* Register offsets */
 #define REG_CTRL        0x000
+#define REG_SET         0x004
+#define REG_CLR         0x008
+#define REG_TOG         0x00C
 #define REG_DATA        0x010
 #define REG_CUST0       0x020
 #define REG_CUST1       0x030
@@ -36,6 +39,7 @@
 #define REG_CRYPTO2     0x080
 #define REG_CRYPTO3     0x090
 #define REG_CUSTCAP     0x110
+#define REG_LOCK        0x120
 #define REG_ROM0        0x1A0
 #define REG_ROM1        0x1B0
 #define REG_ROM2        0x1C0
@@ -51,9 +55,108 @@
 #define CTRL_ADDR_MASK          0x1F
 
 /* LOCK bits */
+#define LOCK_CUST0              (1U << 0)
+#define LOCK_CUST1              (1U << 1)
+#define LOCK_CUST2              (1U << 2)
+#define LOCK_CUST3              (1U << 3)
 #define LOCK_CRYPTOKEY          (1U << 4)
+#define LOCK_CUSTCAP_SHADOW     (1U << 7)
+#define LOCK_CUSTCAP            (1U << 9)
 
 #define BAD_DATA                0xBADABADAU
+#define CTRL_RW_MASK            (CTRL_WR_UNLOCK_MASK | CTRL_RELOAD_SHADOWS | \
+                                 CTRL_RD_BANK_OPEN | CTRL_ADDR_MASK)
+
+static void stmp3770_ocotp_set_error(STMP3770OCOTPState *s)
+{
+    s->ctrl |= CTRL_ERROR;
+}
+
+static void stmp3770_ocotp_reload_shadows(STMP3770OCOTPState *s)
+{
+    s->custcap = s->otp_custcap;
+    s->lock = s->otp_lock;
+}
+
+static void stmp3770_ocotp_maybe_finish_reload(STMP3770OCOTPState *s)
+{
+    if ((s->ctrl & CTRL_RELOAD_SHADOWS) && !(s->ctrl & CTRL_RD_BANK_OPEN)) {
+        stmp3770_ocotp_reload_shadows(s);
+        s->ctrl &= ~CTRL_RELOAD_SHADOWS;
+    }
+}
+
+static bool stmp3770_ocotp_program_locked(STMP3770OCOTPState *s, uint32_t lock_bit)
+{
+    if (s->lock & lock_bit) {
+        stmp3770_ocotp_set_error(s);
+        return true;
+    }
+
+    return false;
+}
+
+static bool stmp3770_ocotp_read_banks_open(STMP3770OCOTPState *s)
+{
+    return (s->ctrl & CTRL_RD_BANK_OPEN) != 0;
+}
+
+static uint64_t stmp3770_ocotp_fail_closed_bank(STMP3770OCOTPState *s)
+{
+    stmp3770_ocotp_set_error(s);
+    return BAD_DATA;
+}
+
+static void stmp3770_ocotp_program_word(STMP3770OCOTPState *s, uint32_t addr,
+                                        uint32_t value)
+{
+    switch (addr) {
+    case 0x00:
+        if (!stmp3770_ocotp_program_locked(s, LOCK_CUST0)) {
+            s->cust[0] |= value;
+        }
+        return;
+    case 0x01:
+        if (!stmp3770_ocotp_program_locked(s, LOCK_CUST1)) {
+            s->cust[1] |= value;
+        }
+        return;
+    case 0x02:
+        if (!stmp3770_ocotp_program_locked(s, LOCK_CUST2)) {
+            s->cust[2] |= value;
+        }
+        return;
+    case 0x03:
+        if (!stmp3770_ocotp_program_locked(s, LOCK_CUST3)) {
+            s->cust[3] |= value;
+        }
+        return;
+    case 0x04:
+    case 0x05:
+    case 0x06:
+    case 0x07:
+        if (!stmp3770_ocotp_program_locked(s, LOCK_CRYPTOKEY)) {
+            s->crypto[addr - 0x04] |= value;
+        }
+        return;
+    case 0x0f:
+        if (!stmp3770_ocotp_program_locked(s, LOCK_CUSTCAP)) {
+            s->otp_custcap |= value;
+        }
+        return;
+    case 0x10:
+        s->otp_lock |= value;
+        return;
+    case 0x18:
+    case 0x19:
+    case 0x1a:
+        s->rom[addr - 0x18] |= value;
+        return;
+    default:
+        stmp3770_ocotp_set_error(s);
+        return;
+    }
+}
 
 static int cust_idx_from_offset(hwaddr offset)
 {
@@ -102,6 +205,9 @@ static uint64_t stmp3770_ocotp_read(void *opaque, hwaddr offset, unsigned size)
     case REG_CUSTCAP:
         return s->custcap;
 
+    case REG_LOCK:
+        return s->lock;
+
     case REG_VERSION:
         return s->version;
 
@@ -111,12 +217,19 @@ static uint64_t stmp3770_ocotp_read(void *opaque, hwaddr offset, unsigned size)
 
     idx = cust_idx_from_offset(offset);
     if (idx >= 0) {
+        if (!stmp3770_ocotp_read_banks_open(s)) {
+            return stmp3770_ocotp_fail_closed_bank(s);
+        }
         return s->cust[idx];
     }
 
     idx = crypto_idx_from_offset(offset);
     if (idx >= 0) {
+        if (!stmp3770_ocotp_read_banks_open(s)) {
+            return stmp3770_ocotp_fail_closed_bank(s);
+        }
         if (s->lock & LOCK_CRYPTOKEY) {
+            stmp3770_ocotp_set_error(s);
             return BAD_DATA;
         }
         return s->crypto[idx];
@@ -124,6 +237,9 @@ static uint64_t stmp3770_ocotp_read(void *opaque, hwaddr offset, unsigned size)
 
     idx = rom_idx_from_offset(offset);
     if (idx >= 0) {
+        if (!stmp3770_ocotp_read_banks_open(s)) {
+            return stmp3770_ocotp_fail_closed_bank(s);
+        }
         return s->rom[idx];
     }
 
@@ -137,6 +253,10 @@ static void stmp3770_ocotp_write(void *opaque, hwaddr offset,
                                  uint64_t value, unsigned size)
 {
     STMP3770OCOTPState *s = STMP3770_OCOTP(opaque);
+    hwaddr reg = offset & ~0x0f;
+    hwaddr sct = offset & 0x0f;
+    uint32_t writable;
+    bool reload_requested = false;
 
     if (size != 4) {
         qemu_log_mask(LOG_GUEST_ERROR,
@@ -145,39 +265,95 @@ static void stmp3770_ocotp_write(void *opaque, hwaddr offset,
         return;
     }
 
-    switch (offset) {
+    switch (reg) {
     case REG_CTRL:
-        s->ctrl = (value & ~CTRL_WR_UNLOCK_MASK) |
-                    ((value & CTRL_WR_UNLOCK_MASK) == CTRL_WR_UNLOCK_VALUE
-                     ? CTRL_WR_UNLOCK_VALUE : 0);
-        if (value & CTRL_RELOAD_SHADOWS) {
-            /* Shadow reload is instantaneous in this model */
-            s->ctrl &= ~CTRL_RELOAD_SHADOWS;
+        writable = s->ctrl & ~(CTRL_RW_MASK);
+
+        switch (sct) {
+        case 0x0:
+            writable &= ~CTRL_RW_MASK;
+            writable |= (uint32_t)value & (CTRL_RELOAD_SHADOWS |
+                                           CTRL_RD_BANK_OPEN |
+                                           CTRL_ADDR_MASK);
+            if (((uint32_t)value & CTRL_WR_UNLOCK_MASK) == CTRL_WR_UNLOCK_VALUE) {
+                writable |= CTRL_WR_UNLOCK_VALUE;
+            }
+            break;
+        case REG_SET:
+            writable |= (uint32_t)value & (CTRL_RELOAD_SHADOWS |
+                                           CTRL_RD_BANK_OPEN |
+                                           CTRL_ADDR_MASK);
+            if (((uint32_t)value & CTRL_WR_UNLOCK_MASK) == CTRL_WR_UNLOCK_VALUE) {
+                writable |= CTRL_WR_UNLOCK_VALUE;
+            }
+            break;
+        case REG_CLR:
+            writable &= ~((uint32_t)value & (CTRL_RELOAD_SHADOWS |
+                                             CTRL_RD_BANK_OPEN |
+                                             CTRL_ADDR_MASK |
+                                             CTRL_WR_UNLOCK_MASK));
+            if ((uint32_t)value & CTRL_ERROR) {
+                s->ctrl &= ~CTRL_ERROR;
+            }
+            break;
+        case REG_TOG:
+            writable ^= (uint32_t)value & (CTRL_RELOAD_SHADOWS |
+                                           CTRL_RD_BANK_OPEN |
+                                           CTRL_ADDR_MASK);
+            break;
+        default:
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "stmp3770-ocotp: write to invalid CTRL alias "
+                          HWADDR_FMT_plx "\n", offset);
+            return;
         }
-        if (value & CTRL_RD_BANK_OPEN) {
-            s->ctrl |= CTRL_RD_BANK_OPEN;
-        } else {
-            s->ctrl &= ~CTRL_RD_BANK_OPEN;
+
+        s->ctrl = (s->ctrl & ~(CTRL_RW_MASK | CTRL_ERROR)) |
+                  (writable & CTRL_RW_MASK) |
+                  (s->ctrl & CTRL_ERROR);
+        reload_requested = (s->ctrl & CTRL_RELOAD_SHADOWS) != 0;
+        if (reload_requested) {
+            stmp3770_ocotp_maybe_finish_reload(s);
         }
-        if (value & CTRL_ERROR) {
-            /* Writing 1 clears the error flag */
-            s->ctrl &= ~CTRL_ERROR;
-        }
-        break;
+        return;
 
     case REG_DATA:
-        s->data = value;
-        break;
+        if (sct != 0x0) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "stmp3770-ocotp: DATA has no SCT alias "
+                          HWADDR_FMT_plx "\n", offset);
+            return;
+        }
+        s->data = (uint32_t)value;
+        if ((s->ctrl & CTRL_ERROR) ||
+            ((s->ctrl & CTRL_WR_UNLOCK_MASK) != CTRL_WR_UNLOCK_VALUE)) {
+            return;
+        }
+        stmp3770_ocotp_program_word(s, s->ctrl & CTRL_ADDR_MASK, s->data);
+        if (!(s->ctrl & CTRL_ERROR)) {
+            s->ctrl &= ~CTRL_WR_UNLOCK_MASK;
+        }
+        return;
 
     case REG_CUSTCAP:
-        s->custcap = value;
-        break;
+        if (sct != 0x0) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "stmp3770-ocotp: CUSTCAP has no SCT alias "
+                          HWADDR_FMT_plx "\n", offset);
+            return;
+        }
+        if (s->lock & LOCK_CUSTCAP_SHADOW) {
+            stmp3770_ocotp_set_error(s);
+            return;
+        }
+        s->custcap = (uint32_t)value;
+        return;
 
     default:
         qemu_log_mask(LOG_GUEST_ERROR,
                       "stmp3770-ocotp: write to read-only/unimplemented offset "
                       HWADDR_FMT_plx "\n", offset);
-        break;
+        return;
     }
 }
 
@@ -199,10 +375,13 @@ static void stmp3770_ocotp_reset(DeviceState *dev)
     s->data = 0;
     memset(s->cust, 0, sizeof(s->cust));
     memset(s->crypto, 0, sizeof(s->crypto));
+    s->otp_custcap = 0;
     s->custcap = 0;
+    s->otp_lock = 0;
     memset(s->rom, 0, sizeof(s->rom));
     s->lock = 0;
-    s->version = 0x01010000; /* OCOTP Block v1.1 */
+    s->version = 0x01010000; /* HW_OCOTP_VERSION fields: MAJOR=1, MINOR=1, STEP=0 */
+    stmp3770_ocotp_reload_shadows(s);
 }
 
 static void stmp3770_ocotp_init(Object *obj)
@@ -217,14 +396,16 @@ static void stmp3770_ocotp_init(Object *obj)
 
 static const VMStateDescription vmstate_stmp3770_ocotp = {
     .name = TYPE_STMP3770_OCOTP,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(ctrl, STMP3770OCOTPState),
         VMSTATE_UINT32(data, STMP3770OCOTPState),
         VMSTATE_UINT32_ARRAY(cust, STMP3770OCOTPState, STMP3770_OCOTP_NUM_CUST),
         VMSTATE_UINT32_ARRAY(crypto, STMP3770OCOTPState, STMP3770_OCOTP_NUM_CRYPTO),
+        VMSTATE_UINT32(otp_custcap, STMP3770OCOTPState),
         VMSTATE_UINT32(custcap, STMP3770OCOTPState),
+        VMSTATE_UINT32(otp_lock, STMP3770OCOTPState),
         VMSTATE_UINT32_ARRAY(rom, STMP3770OCOTPState, STMP3770_OCOTP_NUM_ROM),
         VMSTATE_UINT32(lock, STMP3770OCOTPState),
         VMSTATE_UINT32(version, STMP3770OCOTPState),

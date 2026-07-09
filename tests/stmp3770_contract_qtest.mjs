@@ -18,6 +18,7 @@ const DIGCTL_BASE = 0x8001c000;
 const PINCTRL_BASE = 0x80018000;
 const DFLPT_BASE = 0x800c0000;
 const LCDIF_BASE = 0x80030000;
+const OCOTP_BASE = 0x8002c000;
 const POWER_BASE = 0x80044000;
 const RTC_BASE = 0x8005c000;
 
@@ -345,6 +346,96 @@ async function testDflptMpteTracksLocator() {
   });
 }
 
+async function testOcotpBankOpenContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(OCOTP_BASE + 0x000, 0x3e770000);
+    await machine.writel(OCOTP_BASE + 0x010, 0x11223344);
+
+    const custcap = await machine.readl(OCOTP_BASE + 0x110);
+    const cust0Closed = await machine.readl(OCOTP_BASE + 0x020);
+    const ctrlAfterClosedRead = await machine.readl(OCOTP_BASE + 0x000);
+
+    assert.equal(custcap, 0, `OCOTP CUSTCAP shadow should be readable without bank open: got 0x${custcap.toString(16)}`);
+    assert.equal(cust0Closed, 0xbadabada, `OCOTP CUST0 should return BADABADA when bank is closed: got 0x${cust0Closed.toString(16)}`);
+    assert.notEqual(
+      ctrlAfterClosedRead & (1 << 9),
+      0,
+      `OCOTP CTRL.ERROR should latch after closed-bank read: ctrl=0x${ctrlAfterClosedRead.toString(16)}`,
+    );
+
+    await machine.writel(OCOTP_BASE + 0x008, 0x00000200);
+    const ctrlAfterClr = await machine.readl(OCOTP_BASE + 0x000);
+    assert.equal(
+      ctrlAfterClr & (1 << 9),
+      0,
+      `OCOTP CTRL_CLR should clear ERROR via SCT clear space: ctrl=0x${ctrlAfterClr.toString(16)}`,
+    );
+
+    await machine.writel(OCOTP_BASE + 0x004, 0x00001000);
+    const cust0Open = await machine.readl(OCOTP_BASE + 0x020);
+
+    assert.equal(cust0Open, 0x11223344, `OCOTP CUST0 should expose programmed OTP bits once bank is open: got 0x${cust0Open.toString(16)}`);
+  });
+}
+
+async function testOcotpLockAndShadowContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(OCOTP_BASE + 0x110, 0x12345678);
+    const custcapBeforeLock = await machine.readl(OCOTP_BASE + 0x110);
+    assert.equal(custcapBeforeLock, 0x12345678, `OCOTP CUSTCAP shadow should be writable before lock: got 0x${custcapBeforeLock.toString(16)}`);
+
+    await machine.writel(OCOTP_BASE + 0x000, 0x3e77000f);
+    await machine.writel(OCOTP_BASE + 0x010, 0x12345678);
+
+    await machine.writel(OCOTP_BASE + 0x000, 0x3e770010);
+    await machine.writel(OCOTP_BASE + 0x010, 0x00000090);
+
+    const ctrlAfterLockProgram = await machine.readl(OCOTP_BASE + 0x000);
+    assert.equal(
+      ctrlAfterLockProgram & 0xffff0000,
+      0,
+      `OCOTP successful DATA write should clear WR_UNLOCK: ctrl=0x${ctrlAfterLockProgram.toString(16)}`,
+    );
+
+    await machine.writel(OCOTP_BASE + 0x004, 0x00002000);
+    const lockShadow = await machine.readl(OCOTP_BASE + 0x120);
+    const custcapReloaded = await machine.readl(OCOTP_BASE + 0x110);
+    assert.equal(lockShadow, 0x00000090, `OCOTP LOCK shadow should reload programmed lock bits: got 0x${lockShadow.toString(16)}`);
+    assert.equal(
+      custcapReloaded,
+      0x12345678,
+      `OCOTP reload should repopulate CUSTCAP shadow from OTP bank 1 word 7: got 0x${custcapReloaded.toString(16)}`,
+    );
+
+    await machine.writel(OCOTP_BASE + 0x110, 0xdeadbeef);
+    const custcapAfterLock = await machine.readl(OCOTP_BASE + 0x110);
+    const ctrlAfterLockedShadowWrite = await machine.readl(OCOTP_BASE + 0x000);
+
+    assert.equal(
+      custcapAfterLock,
+      0x12345678,
+      `OCOTP CUSTCAP shadow should ignore writes after CUSTCAP_SHADOW lock: got 0x${custcapAfterLock.toString(16)}`,
+    );
+    assert.notEqual(
+      ctrlAfterLockedShadowWrite & (1 << 9),
+      0,
+      `OCOTP locked shadow write should raise CTRL.ERROR: ctrl=0x${ctrlAfterLockedShadowWrite.toString(16)}`,
+    );
+
+    await machine.writel(OCOTP_BASE + 0x008, 0x00000200);
+    await machine.writel(OCOTP_BASE + 0x004, 0x00001000);
+    const crypto0 = await machine.readl(OCOTP_BASE + 0x060);
+    const ctrlAfterCryptoRead = await machine.readl(OCOTP_BASE + 0x000);
+
+    assert.equal(crypto0, 0xbadabada, `OCOTP locked CRYPTO0 should return BADABADA: got 0x${crypto0.toString(16)}`);
+    assert.notEqual(
+      ctrlAfterCryptoRead & (1 << 9),
+      0,
+      `OCOTP locked crypto read should raise CTRL.ERROR: ctrl=0x${ctrlAfterCryptoRead.toString(16)}`,
+    );
+  });
+}
+
 const tests = [
   ['RTC 1ms IRQ routing', testRtc1MsecIrq],
   ['LCDIF CTRL1 interrupt layout', testLcdifCtrl1Layout],
@@ -353,6 +444,8 @@ const tests = [
   ['POWER reset values', testPowerResetValues],
   ['DFLPT PTE_2048 contract', testDflptPte2048Contract],
   ['DFLPT MPTE locator remap', testDflptMpteTracksLocator],
+  ['OCOTP bank-open contract', testOcotpBankOpenContract],
+  ['OCOTP lock and shadow contract', testOcotpLockAndShadowContract],
 ];
 
 let failures = 0;

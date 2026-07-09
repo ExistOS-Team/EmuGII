@@ -32,7 +32,9 @@ struct STMP3770OCOTPState {
     uint32_t data;
     uint32_t cust[STMP3770_OCOTP_NUM_CUST];
     uint32_t crypto[STMP3770_OCOTP_NUM_CRYPTO];
+    uint32_t otp_custcap;
     uint32_t custcap;
+    uint32_t otp_lock;
     uint32_t rom[STMP3770_OCOTP_NUM_ROM];
     uint32_t lock;
     uint32_t version;
