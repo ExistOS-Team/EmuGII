@@ -12,8 +12,8 @@ ExistOS Hypervisor 和 System。
 - Machine 类型：`stmp3770`
 - CPU：ARM926EJ-S
 - 板级内存：`0x00000000` 起 512 KiB SRAM；只有显式提供 QEMU RAM 时才映射外部 DRAM
-- 启动输入：`-bios` 或 `-kernel`，镜像加载到 SRAM 起始地址
-- NAND 输入：第一个 `-drive if=none` 后端，连接到 GPMI
+- 启动输入：显式 `-bios` 或 `-kernel` 时加载对应镜像；否则自动读取可执行文件同目录的 `rom.bin`
+- NAND 输入：显式第一个 `-drive if=none` 后端优先；否则自动读取可执行文件同目录的 `flash.bin`
 - 固件验证：`tests/ExistOS` 可启动 ExistOS Hypervisor 并进入 System
 - UI：LCDIF 图形前面板包含 LCD、按键输入和状态指示；也支持纯串口 headless 运行
 
@@ -94,8 +94,13 @@ scons -c
 Windows 下主要产物：
 
 ```text
-build\qemu\build\qemu-system-arm.exe
+build\EmuGii\EmuGii.exe
 ```
+
+`build\EmuGii` 是可直接运行的发布目录。根目录包含入口 `EmuGii.exe`；真正的 QEMU
+运行时和非系统 DLL 依赖位于 `build\EmuGii\bin`；默认启动用的 `rom.bin` 和
+`flash.bin` 位于 `build\EmuGii\firmware`。如果仓库根目录存在 `rom.bin` /
+`flash.bin`，构建时优先复制它们；否则回退复制 `tests\ExistOS` 中的已验证 fixture。
 
 ## 运行
 
@@ -127,8 +132,19 @@ build\qemu\build\qemu-system-arm.exe
   -serial stdio
 ```
 
-图形 LCD/前面板输出依赖当前 QEMU build 中可用的显示后端，例如 `-display gtk`。
-`tests/ExistOS` 启动脚本默认使用 `-display none`，用于串口验证。
+从发布目录使用默认 ROM 和 Flash 启动：
+
+```powershell
+.\build\EmuGii\EmuGii.exe
+```
+
+默认启动会从 `build\EmuGii\firmware\rom.bin` 加载 SRAM 固件，并把
+`build\EmuGii\firmware\flash.bin` 挂到 GPMI，并默认进入 `stmp3770` machine。图形
+LCD/前面板默认保持启用；串口 console 连接到 debug UART，并在当前控制台显示输出。
+
+图形输出依赖当前 QEMU build 中可用的显示后端，例如 `-display gtk`。需要纯串口
+headless 验证时，可以显式传入 `-display none`；`tests/ExistOS` 启动脚本也是这种
+用途。
 
 ## ExistOS Fixture
 

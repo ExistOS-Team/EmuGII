@@ -5,7 +5,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from build_helpers import resolve_bash, to_msys_path
+from build_helpers import (
+    collect_release_files,
+    find_executable,
+    parse_objdump_dll_names,
+    prepend_path_entries,
+    resolve_bash,
+    resolve_windows_dll_dependencies,
+    runtime_path_entries_for_bash,
+    to_msys_path,
+)
 
 
 class BuildHelperTests(unittest.TestCase):
@@ -50,6 +59,23 @@ class BuildHelperTests(unittest.TestCase):
                 )
 
                 self.assertEqual(Path(resolved).resolve(), good_bash.resolve())
+
+    def test_path_lookup_can_derive_git_bash_from_git_cmd_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            git_root = Path(tmp) / "Git"
+            cmd_dir = git_root / "cmd"
+            bin_dir = git_root / "bin"
+            cmd_dir.mkdir(parents=True)
+            bin_dir.mkdir(parents=True)
+            bash = bin_dir / ("bash.exe" if os.name == "nt" else "bash")
+            bash.write_text("", encoding="utf-8")
+
+            resolved = resolve_bash(
+                {"PATH": str(cmd_dir)},
+                is_compatible=lambda path: Path(path).resolve() == bash.resolve(),
+            )
+
+            self.assertEqual(Path(resolved).resolve(), bash.resolve())
 
     def test_env_override_rejects_incompatible_bash(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -100,6 +126,185 @@ class BuildHelperTests(unittest.TestCase):
                 offenders.append(relpath)
 
         self.assertEqual(offenders, [])
+
+    def test_collect_release_files_includes_binary_dependencies_and_runtime_images(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build_dir = Path(tmp) / "qemu" / "build"
+            runtime_dir = Path(tmp) / "runtime"
+            dep_dir = Path(tmp) / "mingw" / "bin"
+            build_dir.mkdir(parents=True)
+            runtime_dir.mkdir()
+            dep_dir.mkdir(parents=True)
+
+            binary = build_dir / ("qemu-system-arm.exe" if os.name == "nt" else "qemu-system-arm")
+            binary.write_text("exe", encoding="utf-8")
+            (build_dir / "libglib-2.0-0.dll").write_text("dll", encoding="utf-8")
+            (build_dir / "qemu-system-arm.pdb").write_text("debug", encoding="utf-8")
+            (dep_dir / "libpixman-1-0.dll").write_text("dll", encoding="utf-8")
+            (dep_dir / "kernel32.dll").write_text("system", encoding="utf-8")
+            rom = runtime_dir / "rom.bin"
+            flash = runtime_dir / "flash.bin"
+            rom.write_bytes(b"rom")
+            flash.write_bytes(b"flash")
+
+            files = collect_release_files(
+                build_dir,
+                runtime_files=[rom, flash],
+                dependency_names=["libpixman-1-0.dll", "kernel32.dll"],
+                path_env=str(dep_dir),
+                os_name="nt",
+            )
+
+            relpaths = {dest for _, dest in files}
+
+            self.assertIn(Path(binary.name), relpaths)
+            self.assertIn(Path("libglib-2.0-0.dll"), relpaths)
+            self.assertIn(Path("libpixman-1-0.dll"), relpaths)
+            self.assertIn(Path("rom.bin"), relpaths)
+            self.assertIn(Path("flash.bin"), relpaths)
+            self.assertNotIn(Path("qemu-system-arm.pdb"), relpaths)
+            self.assertNotIn(Path("kernel32.dll"), relpaths)
+
+    def test_collect_release_files_can_rename_binary_for_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build_dir = Path(tmp)
+            binary = build_dir / "qemu-system-arm.exe"
+            binary.write_text("exe", encoding="utf-8")
+
+            files = collect_release_files(
+                build_dir,
+                binary_dest_name="EmuGii.exe",
+                os_name="nt",
+            )
+
+            self.assertEqual(files, [(binary, Path("EmuGii.exe"))])
+
+    def test_collect_release_files_can_place_runtime_and_firmware_files_under_subdirectories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build_dir = Path(tmp) / "build"
+            dep_dir = Path(tmp) / "deps"
+            runtime_dir = Path(tmp) / "runtime"
+            build_dir.mkdir()
+            dep_dir.mkdir()
+            runtime_dir.mkdir()
+            binary = build_dir / "qemu-system-arm.exe"
+            local_dll = build_dir / "libgtk-3-0.dll"
+            path_dll = dep_dir / "libglib-2.0-0.dll"
+            rom = runtime_dir / "rom.bin"
+            flash = runtime_dir / "flash.bin"
+            binary.write_text("exe", encoding="utf-8")
+            local_dll.write_text("dll", encoding="utf-8")
+            path_dll.write_text("dll", encoding="utf-8")
+            rom.write_bytes(b"rom")
+            flash.write_bytes(b"flash")
+
+            files = collect_release_files(
+                build_dir,
+                runtime_files=[rom, flash],
+                dependency_names=[path_dll.name],
+                path_env=str(dep_dir),
+                os_name="nt",
+                binary_dest_name=Path("bin") / "EmuGii-runtime.exe",
+                dependency_dest_dir="bin",
+                runtime_dest_dir="firmware",
+            )
+
+            relpaths = {dest for _, dest in files}
+
+            self.assertIn(Path("bin") / "EmuGii-runtime.exe", relpaths)
+            self.assertIn(Path("bin") / local_dll.name, relpaths)
+            self.assertIn(Path("bin") / path_dll.name, relpaths)
+            self.assertIn(Path("firmware") / "rom.bin", relpaths)
+            self.assertIn(Path("firmware") / "flash.bin", relpaths)
+
+    def test_parse_objdump_dll_names_extracts_pe_imports(self):
+        output = """
+The Import Tables (interpreted .idata section contents)
+ DLL Name: libglib-2.0-0.dll
+ vma:            Hint    Time      Forward  DLL       First
+ DLL Name: KERNEL32.dll
+"""
+
+        self.assertEqual(
+            parse_objdump_dll_names(output),
+            ["libglib-2.0-0.dll", "KERNEL32.dll"],
+        )
+
+    def test_find_executable_resolves_from_explicit_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / ("tool.exe" if os.name == "nt" else "tool")
+            exe.write_text("", encoding="utf-8")
+
+            resolved = find_executable(exe.name, path_env=str(Path(tmp)))
+
+            self.assertEqual(Path(resolved).resolve(), exe.resolve())
+
+    def test_runtime_path_entries_for_msys_usr_bash_prefers_runtime_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bash_dir = root / "usr" / "bin"
+            bash_dir.mkdir(parents=True)
+            (root / "mingw64" / "bin").mkdir(parents=True)
+            bash = bash_dir / ("bash.exe" if os.name == "nt" else "bash")
+            bash.write_text("", encoding="utf-8")
+
+            entries = runtime_path_entries_for_bash(bash)
+
+            self.assertEqual(
+                entries,
+                [
+                    str(root / "mingw64" / "bin"),
+                    str(root / "usr" / "bin"),
+                ],
+            )
+
+    def test_prepend_path_entries_deduplicates_and_preserves_existing_order(self):
+        original = os.pathsep.join([
+            "C:" + "\\existing",
+            "D:" + "\\shared",
+            "C:" + "\\existing",
+        ])
+        combined = prepend_path_entries(
+            original,
+            [
+                "D:" + "\\shared",
+                "E:" + "\\new",
+                "C:" + "\\existing",
+            ],
+        )
+
+        self.assertEqual(
+            combined.split(os.pathsep),
+            [
+                "D:" + "\\shared",
+                "E:" + "\\new",
+                "C:" + "\\existing",
+            ],
+        )
+
+    def test_resolve_windows_dll_dependencies_walks_transitive_imports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dep_dir = Path(tmp)
+            first = dep_dir / "libfirst.dll"
+            second = dep_dir / "libsecond.dll"
+            first.write_text("", encoding="utf-8")
+            second.write_text("", encoding="utf-8")
+
+            def imports(path):
+                if Path(path).name == "libfirst.dll":
+                    return ["libsecond.dll", "kernel32.dll"]
+                return []
+
+            dependencies = resolve_windows_dll_dependencies(
+                ["libfirst.dll"],
+                str(dep_dir),
+                import_reader=imports,
+            )
+
+            self.assertEqual(
+                [path.name for path in dependencies],
+                ["libfirst.dll", "libsecond.dll"],
+            )
 
 
 if __name__ == "__main__":

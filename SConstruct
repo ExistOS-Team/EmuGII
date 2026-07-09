@@ -6,7 +6,15 @@ import shlex
 import shutil
 import subprocess
 
-from build_helpers import resolve_bash, to_msys_path
+from build_helpers import (
+    collect_release_files,
+    find_executable,
+    parse_objdump_dll_names,
+    prepend_path_entries,
+    resolve_bash,
+    runtime_path_entries_for_bash,
+    to_msys_path,
+)
 
 # 项目路径
 PROJECT_ROOT = Dir('#').abspath
@@ -14,11 +22,36 @@ QEMU_SOURCE = os.path.join(PROJECT_ROOT, 'ThirdParty', 'qemu')
 BUILD_DIR = os.path.join(PROJECT_ROOT, 'build')
 QEMU_BUILD = os.path.join(BUILD_DIR, 'qemu')
 QEMU_BUILDDIR = os.path.join(QEMU_BUILD, 'build')
+RELEASE_DIR = os.path.join(BUILD_DIR, 'EmuGii')
+RELEASE_BINARY = 'EmuGii.exe' if os.name == 'nt' else 'EmuGii'
+RELEASE_RUNTIME_DIR = 'bin' if os.name == 'nt' else ''
+RELEASE_FIRMWARE_DIR = 'firmware'
+RELEASE_RUNTIME_BINARY = (
+    os.path.join(RELEASE_RUNTIME_DIR, 'EmuGii-runtime.exe')
+    if os.name == 'nt' else RELEASE_BINARY
+)
 PATCHES_DIR = os.path.join(PROJECT_ROOT, 'patches')
 SRC_DIR = os.path.join(PROJECT_ROOT, 'src')
+TESTS_DIR = os.path.join(PROJECT_ROOT, 'tests')
 
 # SCons 环境
 env = Environment(ENV=os.environ)
+
+
+def prepare_bash_env(base_env):
+    """Return an env dict and a compatible bash with runtime PATH entries."""
+    env_vars = dict(base_env)
+    bash = resolve_bash(env_vars)
+    runtime_entries = runtime_path_entries_for_bash(bash)
+
+    if any(entry.lower().endswith('mingw64\\bin') for entry in runtime_entries):
+        env_vars.setdefault('MSYSTEM', 'MINGW64')
+    env_vars.setdefault('CHERE_INVOKING', '1')
+    env_vars['PATH'] = prepend_path_entries(
+        env_vars.get('PATH', os.environ.get('PATH', '')),
+        runtime_entries + [os.path.dirname(bash)],
+    )
+    return env_vars, bash
 
 # 辅助函数：复制目录
 def copy_tree(src, dst):
@@ -69,16 +102,9 @@ def apply_patches(target, source, env):
     """复制源文件并应用 patches/ 下尚未应用的补丁到 QEMU 源码"""
     # source[0] 是 .copied 标记文件，QEMU 目录是其父目录
     qemu_dir = os.path.dirname(str(source[0]))
-    marker_path = str(target[0])
-
-    # 读取已应用补丁列表
-    applied = set()
-    if os.path.exists(marker_path):
-        try:
-            with open(marker_path, 'r') as f:
-                applied = set(line.strip() for line in f if line.strip())
-        except Exception as e:
-            print(f"  警告: 无法读取补丁标记文件: {e}")
+    tool_env, _ = prepare_bash_env(env['ENV'])
+    qemu_dir_unix = to_msys_path(os.path.abspath(qemu_dir))
+    patch_exe = find_executable('patch', tool_env['PATH'])
 
     # 复制我们的源文件
     print(">>> 复制 STMP3770 源文件到 QEMU 树...")
@@ -136,11 +162,12 @@ def apply_patches(target, source, env):
     print(">>> 归一化 QEMU 源码行尾到 LF...")
     subprocess.run(
         ['git', '-C', qemu_dir, 'config', 'core.autocrlf', 'false'],
-        capture_output=True
+        capture_output=True,
+        env=tool_env,
     )
     result = subprocess.run(
         ['git', '-C', qemu_dir, 'checkout', '--', '.'],
-        capture_output=True, text=True
+        capture_output=True, text=True, env=tool_env
     )
     if result.returncode != 0:
         print("  警告: QEMU 行尾归一化失败，继续尝试应用补丁:")
@@ -156,19 +183,16 @@ def apply_patches(target, source, env):
     if not patch_files:
         print("  警告: patches/ 目录下没有 .patch 文件")
 
-    newly_applied = []
     for patch_file in patch_files:
-        if patch_file in applied:
-            print(f"  已应用，跳过: {patch_file}")
-            continue
-
         patch_path = os.path.join(PATCHES_DIR, patch_file)
+        patch_path_unix = to_msys_path(os.path.abspath(patch_path))
         print(f"  应用补丁: {patch_file}")
 
         result = subprocess.run(
-            ['patch', '-p1', '-d', qemu_dir, '--forward', '-i', patch_path],
+            [patch_exe, '-p1', '-d', qemu_dir_unix, '--forward', '-i', patch_path_unix],
             capture_output=True,
-            text=True
+            text=True,
+            env=tool_env
         )
         output = result.stdout + result.stderr
         if result.returncode != 0:
@@ -177,12 +201,9 @@ def apply_patches(target, source, env):
             return 1
 
         print(f"  成功: {patch_file}")
-        newly_applied.append(patch_file)
 
-    # 更新标记文件
-    with open(marker_path, 'a') as f:
-        for patch_file in newly_applied:
-            f.write(patch_file + '\n')
+    with open(str(target[0]), 'w') as f:
+        f.write("Patched\n")
 
     return None
 
@@ -203,7 +224,7 @@ def configure_qemu(target, source, env):
     print(f"  使用路径: {build_dir_unix}")
 
     qemu_dir_unix = to_msys_path(os.path.abspath(qemu_dir))
-    bash = resolve_bash(env['ENV'])
+    tool_env, bash = prepare_bash_env(env['ENV'])
 
     configure_cmd = [
         bash, '-lc',
@@ -215,7 +236,7 @@ def configure_qemu(target, source, env):
 
     result = subprocess.run(
         configure_cmd,
-        env=env['ENV']
+        env=tool_env
     )
 
     if result.returncode != 0:
@@ -240,14 +261,14 @@ def build_qemu(target, source, env):
     nproc = multiprocessing.cpu_count()
 
     build_dir_unix = to_msys_path(os.path.abspath(build_dir))
-    bash = resolve_bash(env['ENV'])
+    tool_env, bash = prepare_bash_env(env['ENV'])
 
     result = subprocess.run(
         [
             bash, '-lc',
             f'cd {shlex.quote(build_dir_unix)} && ninja qemu-system-arm.exe -j{nproc}'
         ],
-        env=env['ENV']
+        env=tool_env
     )
 
     if result.returncode != 0:
@@ -263,6 +284,168 @@ def build_qemu(target, source, env):
     else:
         print("错误: QEMU 二进制文件未生成")
         return 1
+
+def package_release(target, source, env):
+    """Copy the runnable QEMU binary and runtime files to build/EmuGii."""
+    build_dir = os.path.dirname(str(source[0]))
+    release_dir = os.path.dirname(str(target[0]))
+    launcher_src = os.path.join(SRC_DIR, 'tools', 'emugii-launcher.c')
+    launcher_path = os.path.join(release_dir, RELEASE_BINARY)
+    root_rom = os.path.join(PROJECT_ROOT, 'rom.bin')
+    root_flash = os.path.join(PROJECT_ROOT, 'flash.bin')
+    fixture_rom = os.path.join(PROJECT_ROOT, 'tests', 'ExistOS', 'hypervisor-rom.bin')
+    fixture_flash = os.path.join(PROJECT_ROOT, 'tests', 'ExistOS', 'flash.initial.bin')
+    runtime_files = [
+        root_rom if os.path.exists(root_rom) else fixture_rom,
+        root_flash if os.path.exists(root_flash) else fixture_flash,
+    ]
+    binary_name = 'qemu-system-arm.exe' if os.name == 'nt' else 'qemu-system-arm'
+    binary_path = os.path.join(build_dir, binary_name)
+    dependency_names = []
+    tool_env, bash = prepare_bash_env(env['ENV'])
+    dependency_path = tool_env.get('PATH', os.environ.get('PATH', ''))
+    dependency_reader = None
+
+    if os.name == 'nt' and os.path.exists(binary_path):
+        if bash:
+            def dependency_reader(path):
+                path_unix = to_msys_path(os.path.abspath(path))
+                result = subprocess.run(
+                    [
+                        bash, '-lc',
+                        'objdump -p {}'.format(shlex.quote(path_unix))
+                    ],
+                    capture_output=True,
+                    text=True,
+                    env=tool_env
+                )
+                if result.returncode != 0:
+                    return []
+                return parse_objdump_dll_names(result.stdout)
+
+            binary_path_unix = to_msys_path(os.path.abspath(binary_path))
+            result = subprocess.run(
+                [
+                    bash, '-lc',
+                    'objdump -p {}'.format(shlex.quote(binary_path_unix))
+                ],
+                capture_output=True,
+                text=True,
+                env=tool_env
+            )
+        else:
+            try:
+                result = subprocess.run(
+                    ['objdump', '-p', binary_path],
+                    capture_output=True,
+                    text=True
+                )
+            except FileNotFoundError:
+                result = None
+        if result and result.returncode == 0:
+            dependency_names = parse_objdump_dll_names(result.stdout)
+        else:
+            print("  警告: objdump 依赖扫描失败，只复制构建目录中的 DLL")
+
+    print(f">>> 复制运行产物到 {release_dir} ...")
+    if os.path.exists(release_dir):
+        shutil.rmtree(release_dir)
+    os.makedirs(release_dir, exist_ok=True)
+
+    copied = 0
+    for src, rel_dst in collect_release_files(
+        build_dir,
+        runtime_files=runtime_files,
+        dependency_names=dependency_names,
+        path_env=dependency_path,
+        import_reader=dependency_reader,
+        binary_dest_name=RELEASE_RUNTIME_BINARY,
+        dependency_dest_dir=RELEASE_RUNTIME_DIR or None,
+        runtime_dest_dir=RELEASE_FIRMWARE_DIR,
+    ):
+        dst_path = rel_dst
+        if os.path.basename(os.fspath(src)) == 'hypervisor-rom.bin':
+            dst_path = os.path.join(os.path.dirname(os.fspath(rel_dst)), 'rom.bin')
+        elif os.path.basename(os.fspath(src)) == 'flash.initial.bin':
+            dst_path = os.path.join(os.path.dirname(os.fspath(rel_dst)), 'flash.bin')
+
+        dst_name = os.fspath(dst_path)
+        dst = os.path.join(release_dir, dst_name)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
+        print(f"  已复制: {dst_name}")
+        copied += 1
+
+    if os.name == 'nt':
+        try:
+            gcc_exe = find_executable('gcc', tool_env['PATH'])
+            result = subprocess.run(
+                [
+                    gcc_exe,
+                    '-municode',
+                    '-O2',
+                    '-Wall',
+                    '-Wextra',
+                    launcher_src,
+                    '-lshell32',
+                    '-o',
+                    launcher_path,
+                ],
+                capture_output=True,
+                text=True,
+                env=tool_env,
+            )
+        except FileNotFoundError:
+            print("错误: 未找到 gcc，无法生成 EmuGii.exe 启动器")
+            return 1
+        if result.returncode != 0:
+            print("错误: EmuGii.exe 启动器编译失败")
+            if result.stdout:
+                print(result.stdout)
+            if result.stderr:
+                print(result.stderr)
+            return result.returncode
+        print(f"  已生成: {RELEASE_BINARY}")
+        copied += 1
+
+    if copied == 0:
+        print("错误: 没有可复制的运行产物")
+        return 1
+
+    with open(str(target[0]), 'w') as f:
+        f.write("Packaged\n")
+
+    return None
+
+
+def run_stmp3770_qtest(target, source, env):
+    """Run the host-side STMP3770 qtest contract checks."""
+    marker_path = str(target[0])
+    qemu_build_dir = os.path.abspath(os.path.dirname(str(source[0])))
+    script_path = os.path.join(PROJECT_ROOT, 'tests', 'stmp3770_contract_qtest.mjs')
+    env_vars, _ = prepare_bash_env(env['ENV'])
+    node_exe = find_executable('node', env_vars['PATH'])
+    env_vars['EMUGII_QEMU_BINARY'] = os.path.join(
+        qemu_build_dir,
+        'qemu-system-arm.exe' if os.name == 'nt' else 'qemu-system-arm',
+    )
+    env_vars['EMUGII_QEMU_CWD'] = qemu_build_dir
+
+    print(">>> 运行 STMP3770 qtest 契约回归...")
+    result = subprocess.run(
+        [node_exe, script_path],
+        cwd=PROJECT_ROOT,
+        env=env_vars,
+    )
+
+    if result.returncode != 0:
+        print("错误: STMP3770 qtest 失败")
+        return result.returncode
+
+    with open(marker_path, 'w') as f:
+        f.write("PASS\n")
+
+    return None
 
 # 构建步骤定义
 
@@ -284,7 +467,7 @@ copy_qemu = env.Command(
 # 2. 应用补丁
 patched_qemu = env.Command(
     os.path.join(QEMU_BUILD, '.patched'),
-    copy_qemu,
+    [copy_qemu, Glob('src/**/*', strings=True), Glob('patches/*.patch', strings=True)],
     apply_patches
 )
 
@@ -302,14 +485,28 @@ built_qemu = env.Command(
     build_qemu
 )
 
+packaged_qemu = env.Command(
+    os.path.join(RELEASE_DIR, '.packaged'),
+    [built_qemu, os.path.join(SRC_DIR, 'tools', 'emugii-launcher.c')],
+    package_release
+)
+
+stmp3770_qtest = env.Command(
+    os.path.join(BUILD_DIR, 'tests', '.stmp3770_qtest'),
+    [built_qemu, os.path.join(TESTS_DIR, 'stmp3770_contract_qtest.mjs')],
+    run_stmp3770_qtest
+)
+
 # 默认目标
-Default(built_qemu)
+Default(packaged_qemu)
 
 # 清理目标
-env.Clean(built_qemu, BUILD_DIR)
+env.Clean(packaged_qemu, BUILD_DIR)
 
 # 别名
 env.Alias('qemu', built_qemu)
+env.Alias('package', packaged_qemu)
+env.Alias('qtest', stmp3770_qtest)
 env.Alias('clean', [], Delete(BUILD_DIR))
 
 # ============================================================
@@ -368,6 +565,8 @@ EmuGII 构建系统
 目标:
   scons              - 构建 QEMU (默认)
   scons qemu         - 构建 QEMU
+  scons package      - 复制二进制、依赖库和默认镜像到 build/EmuGii
+  scons qtest        - 构建 QEMU 并运行 STMP3770 qtest 契约回归
   scons test         - 编译测试程序
   scons -c           - 清理构建目录
 
@@ -377,14 +576,19 @@ EmuGII 构建系统
   3. 应用 patches/ 下的补丁(如果有)
   4. 配置 QEMU
   5. 编译 QEMU
+  6. 复制运行产物到 build/EmuGii
 
 测试程序:
+  scons qtest        - 运行 host-side qtest 回归脚本
   scons test         - 编译 tests/hello.c 到 build/tests/hello.bin
 
 生成的二进制文件:
   build/qemu/build/qemu-system-arm       - QEMU 模拟器
+  build/EmuGii/EmuGii                    - 可运行发布目录中的 EmuGII 模拟器
   build/tests/hello.bin                  - 测试程序
 
 运行测试:
+  node tests/stmp3770_contract_qtest.mjs
   build/qemu/build/qemu-system-arm -M stmp3770 -kernel build/tests/hello.bin -nographic
+  build/EmuGii/EmuGii
 """)

@@ -1,0 +1,20 @@
+diff --git a/system/vl.c b/system/vl.c
+index 3b7057e..2b29cb5 100644
+--- a/system/vl.c
++++ b/system/vl.c
+@@ -1388,6 +1388,15 @@ static void qemu_create_default_devices(void)
+ {
+     MachineClass *machine_class = MACHINE_GET_CLASS(current_machine);
+     const char *vc = qemu_display_get_vc(&dpy);
++    const char *machine_name = object_class_get_name(OBJECT_CLASS(machine_class));
++
++    if (g_str_equal(machine_name, "stmp3770-machine")) {
++        if (!nographic && default_serial) {
++            add_device_config(DEV_SERIAL, "stdio");
++            default_serial = 0;
++        }
++        default_monitor = 0;
++    }
+ 
+     if (is_daemonized()) {
+         /* According to documentation and historically, -nographic redirects
