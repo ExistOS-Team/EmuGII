@@ -66,6 +66,8 @@
 #define REG_OCRAM_STATUS11      0x1C0
 #define REG_OCRAM_STATUS12      0x1D0
 #define REG_OCRAM_STATUS13      0x1E0
+#define REG_SCRATCH0            0x290
+#define REG_SCRATCH1            0x2A0
 #define REG_ARMCACHE            0x2B0
 #define REG_DEBUG_TRAP_ADDR_LOW 0x2C0
 #define REG_DEBUG_TRAP_ADDR_HIGH 0x2D0
@@ -100,6 +102,7 @@
 /* CTRL register bits (7.4.1) */
 #define CTRL_LATCH_ENTROPY      (1 << 0)
 #define CTRL_USB_CLKGATE        (1 << 2)
+#define CTRL_RW_MASK            0x20FFF87FU
 
 /* STATUS register reset (7.4.2) - USB features present */
 #define STATUS_USB_FEATURES     ((1U << 31) | (1U << 30) | (1U << 29) | (1U << 28))
@@ -120,6 +123,16 @@
 
 /* SJTAGDBG reset (7.4.10) - SJTAG_STATE = 0x2 */
 #define SJTAGDBG_RESET          (0x2 << 16)
+#define SJTAGDBG_RW_MASK        0x00000003U
+
+#define RAMCTRL_RW_MASK         0x00000F01U
+#define RAMREPAIR_RW_MASK       0x0000FFFFU
+#define ROMCTRL_RW_MASK         0x0000000FU
+#define OCRAM_BIST_CSR_RW_MASK  0x00000301U
+#define OCRAM_BIST_CSR_STATUS_MASK 0x0000000EU
+#define ARMCACHE_RW_MASK        0x00000333U
+#define AHB_STATS_SELECT_RW_MASK 0x0F0F0F0FU
+#define MPTE_LOC_RW_MASK        0x00000FFFU
 
 #define TYPE_STMP3770_DIGCTL "stmp3770-digctl"
 
@@ -146,11 +159,15 @@ struct STMP3770DIGCTLState {
 
     /* Counters */
     uint32_t microseconds;
+    uint64_t microseconds_base_ns;
     uint64_t hclkcount_base_ns;  /* QEMU clock snapshot at last sync */
 
     /* OCRAM BIST */
     uint32_t ocram_bist_csr;
     uint32_t ocram_status[14];   /* STATUS0..STATUS13 */
+
+    /* Scratch */
+    uint32_t scratch[2];
 
     /* ARM cache / debug trap */
     uint32_t armcache;
@@ -173,6 +190,32 @@ uint32_t stmp3770_digctl_get_mpte_loc(STMP3770DIGCTLState *s, int idx)
     return s->mpte_loc[idx] & 0xFFF;
 }
 
+static uint32_t digctl_apply_sct(uint32_t current, uint32_t value,
+                                 bool is_set, bool is_clr, bool is_tog)
+{
+    if (is_set) {
+        return current | value;
+    }
+    if (is_clr) {
+        return current & ~value;
+    }
+    if (is_tog) {
+        return current ^ value;
+    }
+    return value;
+}
+
+static void digctl_write_masked(uint32_t *target, uint32_t value,
+                                uint32_t writable_mask,
+                                bool is_set, bool is_clr, bool is_tog)
+{
+    uint32_t current = *target & writable_mask;
+    uint32_t next = digctl_apply_sct(current, value & writable_mask,
+                                     is_set, is_clr, is_tog) & writable_mask;
+
+    *target = (*target & ~writable_mask) | next;
+}
+
 static uint64_t digctl_hclkcount_get(STMP3770DIGCTLState *s)
 {
     /*
@@ -181,6 +224,20 @@ static uint64_t digctl_hclkcount_get(STMP3770DIGCTLState *s)
      * it is sufficient for software that polls the counter for delays.
      */
     return (uint32_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->hclkcount_base_ns);
+}
+
+static uint32_t digctl_microseconds_get(STMP3770DIGCTLState *s)
+{
+    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    uint32_t elapsed_us = (uint32_t)((now - s->microseconds_base_ns) / 1000);
+
+    return s->microseconds + elapsed_us;
+}
+
+static void digctl_microseconds_set(STMP3770DIGCTLState *s, uint32_t value)
+{
+    s->microseconds = value;
+    s->microseconds_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 }
 
 static uint64_t stmp3770_digctl_read(void *opaque, hwaddr offset, unsigned size)
@@ -234,13 +291,7 @@ static uint64_t stmp3770_digctl_read(void *opaque, hwaddr offset, unsigned size)
         break;
 
     case REG_MICROSECONDS:
-        /*
-         * 1 MHz counter. Approximate using the virtual clock: divide ns
-         * by 1000 to get microseconds, add the stored offset so guest
-         * writes remain observable.
-         */
-        value = s->microseconds +
-                (uint32_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1000);
+        value = digctl_microseconds_get(s);
         break;
 
     case REG_DBGRD:
@@ -257,6 +308,14 @@ static uint64_t stmp3770_digctl_read(void *opaque, hwaddr offset, unsigned size)
 
     case REG_OCRAM_STATUS0 ... REG_OCRAM_STATUS13:
         value = s->ocram_status[(offset - REG_OCRAM_STATUS0) / 0x10];
+        break;
+
+    case REG_SCRATCH0:
+        value = s->scratch[0];
+        break;
+
+    case REG_SCRATCH1:
+        value = s->scratch[1];
         break;
 
     case REG_ARMCACHE:
@@ -322,17 +381,16 @@ static void stmp3770_digctl_write(void *opaque, hwaddr offset,
     bool is_clr = (offset & 0xF) == REG_CLR;
     bool is_tog = (offset & 0xF) == REG_TOG;
     uint32_t *target = NULL;
+    uint32_t writable_mask = 0xFFFFFFFFU;
+    uint32_t old_ctrl = 0;
 
     offset &= ~0xFULL;
 
     switch (offset) {
     case REG_CTRL:
         target = &s->ctrl;
-        /* LATCH_ENTROPY: latch current entropy on rising edge */
-        if (!is_clr && (val & CTRL_LATCH_ENTROPY)) {
-            s->entropy_latched =
-                (uint32_t)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        }
+        writable_mask = CTRL_RW_MASK;
+        old_ctrl = s->ctrl;
         break;
 
     case REG_STATUS:
@@ -345,14 +403,17 @@ static void stmp3770_digctl_write(void *opaque, hwaddr offset,
 
     case REG_RAMCTRL:
         target = &s->ramctrl;
+        writable_mask = RAMCTRL_RW_MASK;
         break;
 
     case REG_RAMREPAIR:
         target = &s->ramrepair;
+        writable_mask = RAMREPAIR_RW_MASK;
         break;
 
     case REG_ROMCTRL:
         target = &s->romctrl;
+        writable_mask = ROMCTRL_RW_MASK;
         break;
 
     case REG_WRITEONCE:
@@ -374,30 +435,12 @@ static void stmp3770_digctl_write(void *opaque, hwaddr offset,
 
     case REG_SJTAGDBG:
         target = &s->sjtagdbg;
-        /* Only bits 0-1 are RW (SJTAG_DEBUG_DATA / SJTAG_DEBUG_OE) */
-        val &= 0x3;
-        if (is_set || is_clr || is_tog) {
-            uint32_t mask = val;
-            if (is_set) {
-                s->sjtagdbg = (s->sjtagdbg & ~0x3) | ((s->sjtagdbg | mask) & 0x3);
-            } else if (is_clr) {
-                s->sjtagdbg = (s->sjtagdbg & ~0x3) | ((s->sjtagdbg & ~mask) & 0x3);
-            } else {
-                s->sjtagdbg = (s->sjtagdbg & ~0x3) | ((s->sjtagdbg ^ mask) & 0x3);
-            }
-        } else {
-            s->sjtagdbg = (s->sjtagdbg & ~0x3) | (val & 0x3);
-        }
-        return;
+        writable_mask = SJTAGDBG_RW_MASK;
+        break;
 
     case REG_MICROSECONDS:
-        /*
-         * RW 1 MHz counter. We capture the offset between the requested
-         * value and the current virtual-clock microseconds so subsequent
-         * reads return a monotonic count from the written base.
-         */
-        s->microseconds = val -
-            (uint32_t)(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1000);
+        digctl_microseconds_set(s, digctl_apply_sct(digctl_microseconds_get(s),
+                                                    val, is_set, is_clr, is_tog));
         return;
 
     case REG_DBGRD:
@@ -406,21 +449,34 @@ static void stmp3770_digctl_write(void *opaque, hwaddr offset,
         return;
 
     case REG_OCRAM_BIST_CSR:
-        target = &s->ocram_bist_csr;
-        /* START is self-clearing in real HW; BIST runs instantly here */
-        if (val & 0x1) {
-            val &= ~0x1U;             /* clear START */
-            val |= (1U << 1);         /* set DONE */
-            val |= (1U << 2);         /* set PASS */
+        s->ocram_bist_csr =
+            (s->ocram_bist_csr & OCRAM_BIST_CSR_STATUS_MASK) |
+            (digctl_apply_sct(s->ocram_bist_csr & OCRAM_BIST_CSR_RW_MASK,
+                              val & OCRAM_BIST_CSR_RW_MASK,
+                              is_set, is_clr, is_tog) & OCRAM_BIST_CSR_RW_MASK);
+        if (s->ocram_bist_csr & 0x1) {
+            s->ocram_bist_csr &= ~0x1U;       /* START is self-clearing */
+            s->ocram_bist_csr &= ~(1U << 3);  /* clear FAIL */
+            s->ocram_bist_csr |= (1U << 1);   /* set DONE */
+            s->ocram_bist_csr |= (1U << 2);   /* set PASS */
         }
-        break;
+        return;
 
     case REG_OCRAM_STATUS0 ... REG_OCRAM_STATUS13:
         /* Read-only BIST status registers */
         return;
 
+    case REG_SCRATCH0:
+        target = &s->scratch[0];
+        break;
+
+    case REG_SCRATCH1:
+        target = &s->scratch[1];
+        break;
+
     case REG_ARMCACHE:
         target = &s->armcache;
+        writable_mask = ARMCACHE_RW_MASK;
         break;
 
     case REG_DEBUG_TRAP_ADDR_LOW:
@@ -437,6 +493,7 @@ static void stmp3770_digctl_write(void *opaque, hwaddr offset,
 
     case REG_AHB_STATS_SELECT:
         target = &s->ahb_stats_select;
+        writable_mask = AHB_STATS_SELECT_RW_MASK;
         break;
 
     case REG_L0_AHB_ACTIVE:
@@ -462,8 +519,10 @@ static void stmp3770_digctl_write(void *opaque, hwaddr offset,
 
     case REG_MPTE0_LOC ... REG_MPTE7_LOC: {
         int idx = (offset - REG_MPTE0_LOC) / 0x10;
-        /* Mask to 12-bit LOC field; forbid 0x800 (fixed PTE_2048) */
-        uint32_t masked = val & 0xFFF;
+        uint32_t masked = digctl_apply_sct(s->mpte_loc[idx] & MPTE_LOC_RW_MASK,
+                                           val & MPTE_LOC_RW_MASK,
+                                           is_set, is_clr, is_tog) & MPTE_LOC_RW_MASK;
+
         if (masked == 0x800) {
             qemu_log_mask(LOG_GUEST_ERROR,
                          "%s: MPTE%d_LOC forbidden value 0x800\n",
@@ -481,14 +540,13 @@ static void stmp3770_digctl_write(void *opaque, hwaddr offset,
     }
 
     if (target) {
-        if (is_set) {
-            *target |= val;
-        } else if (is_clr) {
-            *target &= ~val;
-        } else if (is_tog) {
-            *target ^= val;
-        } else {
-            *target = val;
+        digctl_write_masked(target, val, writable_mask, is_set, is_clr, is_tog);
+
+        if (offset == REG_CTRL &&
+            !(old_ctrl & CTRL_LATCH_ENTROPY) &&
+            (s->ctrl & CTRL_LATCH_ENTROPY)) {
+            s->entropy_latched =
+                (uint32_t)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         }
     }
 }
@@ -517,11 +575,13 @@ static void stmp3770_digctl_reset(DeviceState *dev)
     s->entropy_latched = 0;
     s->sjtagdbg = SJTAGDBG_RESET;        /* SJTAG_STATE = 0x2 */
     s->microseconds = 0;
+    s->microseconds_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     s->hclkcount_base_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
     s->ocram_bist_csr = 0;
     memset(s->ocram_status, 0, sizeof(s->ocram_status));
 
+    memset(s->scratch, 0, sizeof(s->scratch));
     s->armcache = 0;
     s->debug_trap_addr_low = 0;
     s->debug_trap_addr_high = 0;
@@ -549,8 +609,8 @@ static void stmp3770_digctl_init(Object *obj)
 
 static const VMStateDescription vmstate_stmp3770_digctl = {
     .name = TYPE_STMP3770_DIGCTL,
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(ctrl, STMP3770DIGCTLState),
         VMSTATE_UINT32(status, STMP3770DIGCTLState),
@@ -563,9 +623,11 @@ static const VMStateDescription vmstate_stmp3770_digctl = {
         VMSTATE_UINT32(entropy_latched, STMP3770DIGCTLState),
         VMSTATE_UINT32(sjtagdbg, STMP3770DIGCTLState),
         VMSTATE_UINT32(microseconds, STMP3770DIGCTLState),
+        VMSTATE_UINT64(microseconds_base_ns, STMP3770DIGCTLState),
         VMSTATE_UINT64(hclkcount_base_ns, STMP3770DIGCTLState),
         VMSTATE_UINT32(ocram_bist_csr, STMP3770DIGCTLState),
         VMSTATE_UINT32_ARRAY(ocram_status, STMP3770DIGCTLState, 14),
+        VMSTATE_UINT32_ARRAY(scratch, STMP3770DIGCTLState, 2),
         VMSTATE_UINT32(armcache, STMP3770DIGCTLState),
         VMSTATE_UINT32(debug_trap_addr_low, STMP3770DIGCTLState),
         VMSTATE_UINT32(debug_trap_addr_high, STMP3770DIGCTLState),

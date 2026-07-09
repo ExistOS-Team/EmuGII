@@ -346,6 +346,86 @@ async function testDflptMpteTracksLocator() {
   });
 }
 
+async function testDigctlWritableFieldMasks() {
+  await withMachine(async (machine) => {
+    await machine.writel(DIGCTL_BASE + 0x030, 0xffffffff);
+    await machine.writel(DIGCTL_BASE + 0x040, 0xffffffff);
+    await machine.writel(DIGCTL_BASE + 0x050, 0xffffffff);
+    await machine.writel(DIGCTL_BASE + 0x0f0, 0xffffffff);
+    await machine.writel(DIGCTL_BASE + 0x2b0, 0xffffffff);
+    await machine.writel(DIGCTL_BASE + 0x330, 0xffffffff);
+
+    const ramctrl = await machine.readl(DIGCTL_BASE + 0x030);
+    const ramrepair = await machine.readl(DIGCTL_BASE + 0x040);
+    const romctrl = await machine.readl(DIGCTL_BASE + 0x050);
+    const ocramBist = await machine.readl(DIGCTL_BASE + 0x0f0);
+    const armcache = await machine.readl(DIGCTL_BASE + 0x2b0);
+    const ahbStatsSelect = await machine.readl(DIGCTL_BASE + 0x330);
+
+    assert.equal(ramctrl, 0x00000f01, `DIGCTL RAMCTRL should only expose SPEED_SELECT/RAM_REPAIR_EN: got 0x${ramctrl.toString(16)}`);
+    assert.equal(ramrepair, 0x0000ffff, `DIGCTL RAMREPAIR should only expose ADDR[15:0]: got 0x${ramrepair.toString(16)}`);
+    assert.equal(romctrl, 0x0000000f, `DIGCTL ROMCTRL should only expose RD_MARGIN[3:0]: got 0x${romctrl.toString(16)}`);
+    assert.equal(ocramBist, 0x00000306, `DIGCTL OCRAM_BIST_CSR should keep writable bits and self-clear START: got 0x${ocramBist.toString(16)}`);
+    assert.equal(armcache, 0x00000333, `DIGCTL ARMCACHE should only expose CACHE_SS/DTAG_SS/ITAG_SS: got 0x${armcache.toString(16)}`);
+    assert.equal(ahbStatsSelect, 0x0f0f0f0f, `DIGCTL AHB_STATS_SELECT should only expose layer-select nibbles: got 0x${ahbStatsSelect.toString(16)}`);
+  });
+}
+
+async function testDigctlScratchAndMicrosecondsContract() {
+  await withMachine(async (machine) => {
+    const scratch0Reset = await machine.readl(DIGCTL_BASE + 0x290);
+    const scratch1Reset = await machine.readl(DIGCTL_BASE + 0x2a0);
+
+    assert.equal(scratch0Reset, 0, `DIGCTL SCRATCH0 should reset to 0: got 0x${scratch0Reset.toString(16)}`);
+    assert.equal(scratch1Reset, 0, `DIGCTL SCRATCH1 should reset to 0: got 0x${scratch1Reset.toString(16)}`);
+
+    await machine.writel(DIGCTL_BASE + 0x290, 0x89abcdef);
+    await machine.writel(DIGCTL_BASE + 0x2a0, 0x01234567);
+
+    const scratch0 = await machine.readl(DIGCTL_BASE + 0x290);
+    const scratch1 = await machine.readl(DIGCTL_BASE + 0x2a0);
+
+    assert.equal(scratch0, 0x89abcdef, `DIGCTL SCRATCH0 should store arbitrary scratch data: got 0x${scratch0.toString(16)}`);
+    assert.equal(scratch1, 0x01234567, `DIGCTL SCRATCH1 should store arbitrary scratch data: got 0x${scratch1.toString(16)}`);
+
+    await machine.writel(DIGCTL_BASE + 0x0c0, 0x00000100);
+    let microseconds = await machine.readl(DIGCTL_BASE + 0x0c0);
+    assert.equal(microseconds, 0x00000100, `DIGCTL MICROSECONDS base write should seed the counter value: got 0x${microseconds.toString(16)}`);
+
+    await machine.writel(DIGCTL_BASE + 0x0c4, 0x00000020);
+    microseconds = await machine.readl(DIGCTL_BASE + 0x0c0);
+    assert.equal(microseconds, 0x00000120, `DIGCTL MICROSECONDS_SET should OR bits into the current value: got 0x${microseconds.toString(16)}`);
+
+    await machine.writel(DIGCTL_BASE + 0x0c8, 0x00000010);
+    microseconds = await machine.readl(DIGCTL_BASE + 0x0c0);
+    assert.equal(microseconds, 0x00000120, `DIGCTL MICROSECONDS_CLR should only clear selected bits: got 0x${microseconds.toString(16)}`);
+
+    await machine.writel(DIGCTL_BASE + 0x0cc, 0x00000001);
+    microseconds = await machine.readl(DIGCTL_BASE + 0x0c0);
+    assert.equal(microseconds, 0x00000121, `DIGCTL MICROSECONDS_TOG should XOR selected bits: got 0x${microseconds.toString(16)}`);
+  });
+}
+
+async function testDigctlMpteLocatorSetClrTog() {
+  await withMachine(async (machine) => {
+    await machine.writel(DIGCTL_BASE + 0x0400, 0x00000055);
+    let mpte0Loc = await machine.readl(DIGCTL_BASE + 0x0400);
+    assert.equal(mpte0Loc, 0x00000055, `DIGCTL MPTE0_LOC base write should set LOC directly: got 0x${mpte0Loc.toString(16)}`);
+
+    await machine.writel(DIGCTL_BASE + 0x0404, 0x00000a00);
+    mpte0Loc = await machine.readl(DIGCTL_BASE + 0x0400);
+    assert.equal(mpte0Loc, 0x00000a55, `DIGCTL MPTE0_LOC SET alias should OR into the 12-bit locator: got 0x${mpte0Loc.toString(16)}`);
+
+    await machine.writel(DIGCTL_BASE + 0x0408, 0x00000050);
+    mpte0Loc = await machine.readl(DIGCTL_BASE + 0x0400);
+    assert.equal(mpte0Loc, 0x00000a05, `DIGCTL MPTE0_LOC CLR alias should clear selected locator bits: got 0x${mpte0Loc.toString(16)}`);
+
+    await machine.writel(DIGCTL_BASE + 0x040c, 0x0000000f);
+    mpte0Loc = await machine.readl(DIGCTL_BASE + 0x0400);
+    assert.equal(mpte0Loc, 0x00000a0a, `DIGCTL MPTE0_LOC TOG alias should toggle selected locator bits: got 0x${mpte0Loc.toString(16)}`);
+  });
+}
+
 async function testOcotpBankOpenContract() {
   await withMachine(async (machine) => {
     await machine.writel(OCOTP_BASE + 0x000, 0x3e770000);
@@ -444,6 +524,9 @@ const tests = [
   ['POWER reset values', testPowerResetValues],
   ['DFLPT PTE_2048 contract', testDflptPte2048Contract],
   ['DFLPT MPTE locator remap', testDflptMpteTracksLocator],
+  ['DIGCTL writable field masks', testDigctlWritableFieldMasks],
+  ['DIGCTL scratch and microseconds contract', testDigctlScratchAndMicrosecondsContract],
+  ['DIGCTL MPTE locator SET/CLR/TOG', testDigctlMpteLocatorSetClrTog],
   ['OCOTP bank-open contract', testOcotpBankOpenContract],
   ['OCOTP lock and shadow contract', testOcotpLockAndShadowContract],
 ];
