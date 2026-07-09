@@ -33,6 +33,7 @@ RELEASE_RUNTIME_BINARY = (
 PATCHES_DIR = os.path.join(PROJECT_ROOT, 'patches')
 SRC_DIR = os.path.join(PROJECT_ROOT, 'src')
 TESTS_DIR = os.path.join(PROJECT_ROOT, 'tests')
+SRC_SCONSOURCES = Glob('src/**/*', strings=True) + Glob('src/**/**/*', strings=True)
 
 # SCons 环境
 env = Environment(ENV=os.environ)
@@ -467,7 +468,7 @@ copy_qemu = env.Command(
 # 2. 应用补丁
 patched_qemu = env.Command(
     os.path.join(QEMU_BUILD, '.patched'),
-    [copy_qemu, Glob('src/**/*', strings=True), Glob('patches/*.patch', strings=True)],
+    [copy_qemu, SRC_SCONSOURCES, Glob('patches/*.patch', strings=True)],
     apply_patches
 )
 

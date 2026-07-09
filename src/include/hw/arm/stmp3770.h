@@ -121,7 +121,9 @@ struct STMP3770State {
 
     /* Memory regions */
     MemoryRegion sram;          /* 512KB on-chip SRAM */
-    MemoryRegion dflpt;         /* Hardware L1 page-table RAM */
+    MemoryRegion dflpt;         /* Hardware L1 page-table window */
+    uint32_t dflpt_mpte[8];     /* Movable page-table entry payloads */
+    uint32_t dflpt_pte_2048;    /* Semi-programmable fixed PTE */
 };
 
 /* Memory map - based on STMP3770 Reference Manual */

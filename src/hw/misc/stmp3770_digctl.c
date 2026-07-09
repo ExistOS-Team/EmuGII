@@ -167,6 +167,12 @@ struct STMP3770DIGCTLState {
     uint32_t mpte_loc[8];
 };
 
+uint32_t stmp3770_digctl_get_mpte_loc(STMP3770DIGCTLState *s, int idx)
+{
+    g_assert(idx >= 0 && idx < 8);
+    return s->mpte_loc[idx] & 0xFFF;
+}
+
 static uint64_t digctl_hclkcount_get(STMP3770DIGCTLState *s)
 {
     /*

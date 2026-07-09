@@ -58,3 +58,4 @@ config-meson.cross
 /scripts/
 /docs/
 /.codegraph/
+AGENTS.md

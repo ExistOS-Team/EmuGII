@@ -14,7 +14,9 @@ const qemuBinary = process.env.EMUGII_QEMU_BINARY ?? path.join(
 );
 
 const ICOLL_BASE = 0x80000000;
+const DIGCTL_BASE = 0x8001c000;
 const PINCTRL_BASE = 0x80018000;
+const DFLPT_BASE = 0x800c0000;
 const LCDIF_BASE = 0x80030000;
 const POWER_BASE = 0x80044000;
 const RTC_BASE = 0x8005c000;
@@ -301,12 +303,56 @@ async function testPowerResetValues() {
   });
 }
 
+async function testDflptPte2048Contract() {
+  await withMachine(async (machine) => {
+    const pte2048 = await machine.readl(DFLPT_BASE + 0x2000);
+
+    assert.equal(
+      pte2048,
+      0x80000c12,
+      `DFLPT PTE_2048 reset mismatch: got 0x${pte2048.toString(16)}`,
+    );
+
+    await machine.writel(DFLPT_BASE + 0x2000, 0xffffffff);
+    const updated = await machine.readl(DFLPT_BASE + 0x2000);
+
+    assert.equal(
+      updated,
+      0x80000df6,
+      `DFLPT PTE_2048 should only expose AP/DOMAIN/BUFFERABLE fields: got 0x${updated.toString(16)}`,
+    );
+  });
+}
+
+async function testDflptMpteTracksLocator() {
+  await withMachine(async (machine) => {
+    const mpte0Reset = await machine.readl(DFLPT_BASE + 0x0000);
+    const pte5Reset = await machine.readl(DFLPT_BASE + (5 << 2));
+
+    assert.equal(mpte0Reset, 0, `DFLPT MPTE0 reset contents should be 0: got 0x${mpte0Reset.toString(16)}`);
+    assert.equal(pte5Reset, 0, `DFLPT unbound PTE5 should reset to 0: got 0x${pte5Reset.toString(16)}`);
+
+    await machine.writel(DFLPT_BASE + 0x0000, 0x11223344);
+    const mpte0Written = await machine.readl(DFLPT_BASE + 0x0000);
+    assert.equal(mpte0Written, 0x11223344, `DFLPT MPTE0 write should stick at reset locator: got 0x${mpte0Written.toString(16)}`);
+
+    await machine.writel(DIGCTL_BASE + 0x0400, 0x00000020);
+    const oldLocation = await machine.readl(DFLPT_BASE + 0x0000);
+    const newLocation = await machine.readl(DFLPT_BASE + (0x20 << 2));
+
+    assert.equal(oldLocation, 0, `DFLPT old MPTE0 location should become unbound after locator move: got 0x${oldLocation.toString(16)}`);
+    assert.equal(newLocation, 0x11223344, `DFLPT MPTE0 contents should move with DIGCTL_MPTE0_LOC: got 0x${newLocation.toString(16)}`);
+  });
+}
+
 const tests = [
   ['RTC 1ms IRQ routing', testRtc1MsecIrq],
   ['LCDIF CTRL1 interrupt layout', testLcdifCtrl1Layout],
   ['PINCTRL Bank 3 absence', testPinctrlBank3Absent],
   ['POWER version and reset contract', testPowerVersionAndResetContract],
   ['POWER reset values', testPowerResetValues],
+  ['DFLPT PTE_2048 contract', testDflptPte2048Contract],
+  ['DFLPT MPTE locator remap', testDflptMpteTracksLocator],
 ];
 
 let failures = 0;

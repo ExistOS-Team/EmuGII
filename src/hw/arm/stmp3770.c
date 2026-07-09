@@ -24,8 +24,94 @@
 #include "chardev/char-fe.h"
 #include "system/system.h"
 #include "system/address-spaces.h"
+#include "system/memory.h"
 #include "target/arm/cpu-qom.h"
 #include "qemu/module.h"
+
+#define DFLPT_NUM_MPTES          8
+#define DFLPT_PTE2048_OFFSET     0x2000
+#define DFLPT_PTE2048_POINTER    0x80000000U
+#define DFLPT_PTE2048_AP_MASK    (0x3U << 10)
+#define DFLPT_PTE2048_DOMAIN_MASK (0xFU << 5)
+#define DFLPT_PTE2048_BUFFERABLE (1U << 2)
+#define DFLPT_PTE2048_RW_MASK    (DFLPT_PTE2048_AP_MASK | \
+                                  DFLPT_PTE2048_DOMAIN_MASK | \
+                                  DFLPT_PTE2048_BUFFERABLE)
+#define DFLPT_PTE2048_FIXED_BITS (DFLPT_PTE2048_POINTER | (1U << 4) | 0x2U)
+
+static int stmp3770_dflpt_find_mpte(STMP3770State *s, hwaddr addr)
+{
+    hwaddr entry = addr >> 2;
+    int i;
+
+    for (i = 0; i < DFLPT_NUM_MPTES; i++) {
+        if (stmp3770_digctl_get_mpte_loc(s->digctl, i) == entry) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+static MemTxResult stmp3770_dflpt_read(void *opaque, hwaddr addr,
+                                       uint64_t *data, unsigned size,
+                                       MemTxAttrs attrs)
+{
+    STMP3770State *s = opaque;
+    int idx;
+
+    if (addr == DFLPT_PTE2048_OFFSET) {
+        *data = s->dflpt_pte_2048;
+        return MEMTX_OK;
+    }
+
+    idx = stmp3770_dflpt_find_mpte(s, addr);
+    if (idx >= 0) {
+        *data = s->dflpt_mpte[idx];
+    } else {
+        *data = 0;
+    }
+
+    return MEMTX_OK;
+}
+
+static MemTxResult stmp3770_dflpt_write(void *opaque, hwaddr addr,
+                                        uint64_t data, unsigned size,
+                                        MemTxAttrs attrs)
+{
+    STMP3770State *s = opaque;
+    int idx;
+
+    if (addr == DFLPT_PTE2048_OFFSET) {
+        s->dflpt_pte_2048 = DFLPT_PTE2048_FIXED_BITS |
+                            ((uint32_t)data & DFLPT_PTE2048_RW_MASK);
+        return MEMTX_OK;
+    }
+
+    idx = stmp3770_dflpt_find_mpte(s, addr);
+    if (idx < 0) {
+        return MEMTX_ERROR;
+    }
+
+    s->dflpt_mpte[idx] = (uint32_t)data;
+    return MEMTX_OK;
+}
+
+static const MemoryRegionOps stmp3770_dflpt_ops = {
+    .read_with_attrs = stmp3770_dflpt_read,
+    .write_with_attrs = stmp3770_dflpt_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+    .valid.min_access_size = 4,
+    .valid.max_access_size = 4,
+};
+
+static void stmp3770_reset(DeviceState *dev)
+{
+    STMP3770State *s = STMP3770(dev);
+
+    memset(s->dflpt_mpte, 0, sizeof(s->dflpt_mpte));
+    s->dflpt_pte_2048 = DFLPT_PTE2048_FIXED_BITS | (0x3U << 10);
+}
 
 static void stmp3770_init(Object *obj)
 {
@@ -166,13 +252,11 @@ static void stmp3770_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion(system_memory, STMP3770_SRAM_ADDR, &s->sram);
 
     /*
-     * STMP37xx exposes a small hardware first-level page-table RAM used by
-     * ExistOS when USE_HARDWARE_DFLPT is enabled.
+     * STMP37xx exposes a sparse hardware first-level page-table window:
+     * 8 movable MPTEs plus a semi-programmable fixed PTE at entry 2048.
      */
-    if (!memory_region_init_ram(&s->dflpt, OBJECT(dev), "stmp3770.dflpt",
-                                STMP3770_DFLPT_SIZE, errp)) {
-        return;
-    }
+    memory_region_init_io(&s->dflpt, OBJECT(dev), &stmp3770_dflpt_ops, s,
+                          "stmp3770.dflpt", STMP3770_DFLPT_SIZE);
     memory_region_add_subregion(system_memory, STMP3770_DFLPT_ADDR, &s->dflpt);
 
     /* Realize interrupt controller (ICOLL) */
@@ -426,6 +510,12 @@ static void stmp3770_realize(DeviceState *dev, Error **errp)
     sysbus_mmio_map(SYS_BUS_DEVICE(s->uart[1]), 0, STMP3770_APPUART_ADDR);
     sysbus_connect_irq(SYS_BUS_DEVICE(s->uart[1]), 0,
                        qdev_get_gpio_in(DEVICE(s->icoll), STMP3770_IRQ_UART_ERROR));
+
+    /*
+     * Child devices get their own reset during realize, but the SoC-local
+     * DFLPT sparse-window state lives on this container device.
+     */
+    stmp3770_reset(dev);
 }
 
 static void stmp3770_class_init(ObjectClass *oc, const void *data)
@@ -433,6 +523,7 @@ static void stmp3770_class_init(ObjectClass *oc, const void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
 
     dc->realize = stmp3770_realize;
+    device_class_set_legacy_reset(dc, stmp3770_reset);
     /* This SoC is not user-creatable, only instantiated by machine */
     dc->user_creatable = false;
 }
