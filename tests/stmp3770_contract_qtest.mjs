@@ -797,6 +797,49 @@ async function testClkctrlBusyContract() {
   });
 }
 
+async function testClkctrlFracRangeContract() {
+  await withMachine(async (machine) => {
+    let frac = await machine.readl(CLKCTRL_BASE + 0x0d0);
+    assert.equal(frac, 0x92920092, `CLKCTRL FRAC should reset to the documented 0x12 dividers: got 0x${frac.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x0d0, 0x92920011);
+    frac = await machine.readl(CLKCTRL_BASE + 0x0d0);
+    assert.equal(frac & 0x3f, 0x12, `CLKCTRL FRAC should reject CPUFRAC values below 18: got 0x${frac.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x0d0, 0x92920023);
+    frac = await machine.readl(CLKCTRL_BASE + 0x0d0);
+    assert.equal(frac & 0x3f, 0x23, `CLKCTRL FRAC should accept CPUFRAC values within 18..35: got 0x${frac.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x0d0, 0x92920024);
+    frac = await machine.readl(CLKCTRL_BASE + 0x0d0);
+    assert.equal(frac & 0x3f, 0x23, `CLKCTRL FRAC should reject CPUFRAC values above 35 and preserve the previous valid value: got 0x${frac.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x0d0, 0x92120024);
+    frac = await machine.readl(CLKCTRL_BASE + 0x0d0);
+    assert.equal((frac >> 16) & 0x3f, 0x12, `CLKCTRL FRAC should reject PIXFRAC values below 18: got 0x${frac.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x0d0, 0x92230023);
+    frac = await machine.readl(CLKCTRL_BASE + 0x0d0);
+    assert.equal((frac >> 16) & 0x3f, 0x23, `CLKCTRL FRAC should accept PIXFRAC values within 18..35: got 0x${frac.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x0d0, 0x92240023);
+    frac = await machine.readl(CLKCTRL_BASE + 0x0d0);
+    assert.equal((frac >> 16) & 0x3f, 0x23, `CLKCTRL FRAC should reject PIXFRAC values above 35 and preserve the previous valid value: got 0x${frac.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x0d0, 0x11240024);
+    frac = await machine.readl(CLKCTRL_BASE + 0x0d0);
+    assert.equal((frac >> 24) & 0x3f, 0x12, `CLKCTRL FRAC should reject IOFRAC values below 18: got 0x${frac.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x0d0, 0x23230023);
+    frac = await machine.readl(CLKCTRL_BASE + 0x0d0);
+    assert.equal((frac >> 24) & 0x3f, 0x23, `CLKCTRL FRAC should accept IOFRAC values within 18..35: got 0x${frac.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x0d0, 0x24230023);
+    frac = await machine.readl(CLKCTRL_BASE + 0x0d0);
+    assert.equal((frac >> 24) & 0x3f, 0x23, `CLKCTRL FRAC should reject IOFRAC values above 35 and preserve the previous valid value: got 0x${frac.toString(16)}`);
+  });
+}
+
 async function testOcotpBankOpenContract() {
   await withMachine(async (machine) => {
     await machine.writel(OCOTP_BASE + 0x000, 0x3e770000);
@@ -907,6 +950,7 @@ const tests = [
   ['CLKCTRL reset self-clear contract', testClkctrlResetSelfClears],
   ['CLKCTRL divider range contract', testClkctrlDividerRangeContract],
   ['CLKCTRL busy contract', testClkctrlBusyContract],
+  ['CLKCTRL FRAC range contract', testClkctrlFracRangeContract],
   ['OCOTP bank-open contract', testOcotpBankOpenContract],
   ['OCOTP lock and shadow contract', testOcotpLockAndShadowContract],
 ];

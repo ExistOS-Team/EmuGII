@@ -78,6 +78,8 @@
 #define FRAC_PIX_STABLE         (1 << 22)
 #define FRAC_PIXFRAC_MASK       (0x3F << 16)
 #define FRAC_RW_MASK            0xBFBF00BFU
+#define FRAC_MIN_DIV            0x12
+#define FRAC_MAX_DIV            0x23
 
 /* CLKSEQ register bits */
 #define CLKSEQ_BYPASS_CPU       (1 << 7)
@@ -273,6 +275,22 @@ static void stmp3770_clkctrl_write_frac(uint32_t *target, uint32_t val,
 
     stmp3770_clkctrl_write_masked(target, val, FRAC_RW_MASK,
                                   is_set, is_clr, is_tog);
+    stmp3770_clkctrl_restore_invalid_divider(target, old, FRAC_CPUFRAC_MASK,
+                                             0, FRAC_MAX_DIV);
+    stmp3770_clkctrl_restore_invalid_divider(target, old, FRAC_PIXFRAC_MASK,
+                                             16, FRAC_MAX_DIV);
+    stmp3770_clkctrl_restore_invalid_divider(target, old, FRAC_IOFRAC_MASK,
+                                             24, FRAC_MAX_DIV);
+
+    if ((*target & FRAC_CPUFRAC_MASK) < FRAC_MIN_DIV) {
+        *target = (*target & ~FRAC_CPUFRAC_MASK) | (old & FRAC_CPUFRAC_MASK);
+    }
+    if (((*target & FRAC_PIXFRAC_MASK) >> 16) < FRAC_MIN_DIV) {
+        *target = (*target & ~FRAC_PIXFRAC_MASK) | (old & FRAC_PIXFRAC_MASK);
+    }
+    if (((*target & FRAC_IOFRAC_MASK) >> 24) < FRAC_MIN_DIV) {
+        *target = (*target & ~FRAC_IOFRAC_MASK) | (old & FRAC_IOFRAC_MASK);
+    }
 
     if ((old & FRAC_CPUFRAC_MASK) != (*target & FRAC_CPUFRAC_MASK)) {
         *target ^= FRAC_CPU_STABLE;
