@@ -128,7 +128,6 @@ struct STMP3770CLKCTRLState {
 
     /* Clock state */
     bool pll_powered;
-    bool pll_locked;
 };
 
 static uint32_t stmp3770_clkctrl_apply_sct(uint32_t current, uint32_t val,
@@ -229,9 +228,6 @@ static uint64_t stmp3770_clkctrl_read(void *opaque, hwaddr offset, unsigned size
 
     case REG_PLLCTRL1:
         value = s->pllctrl1;
-        if (s->pll_locked) {
-            value |= (1 << 31);  /* LOCK bit */
-        }
         break;
 
     case REG_CPU:
@@ -310,7 +306,6 @@ static void stmp3770_clkctrl_write(void *opaque, hwaddr offset,
         stmp3770_clkctrl_write_masked(target, val, PLLCTRL0_RW_MASK,
                                       is_set, is_clr, is_tog);
         s->pll_powered = (s->pllctrl0 & PLLCTRL0_POWER) != 0;
-        s->pll_locked = s->pll_powered;
         return;
 
     case REG_PLLCTRL1:
@@ -441,7 +436,6 @@ static void stmp3770_clkctrl_reset(DeviceState *dev)
 
     /* Clock state */
     s->pll_powered = false;
-    s->pll_locked = false;
 }
 
 static void stmp3770_clkctrl_init(Object *obj)
@@ -473,7 +467,6 @@ static const VMStateDescription vmstate_stmp3770_clkctrl = {
         VMSTATE_UINT32(clkseq, STMP3770CLKCTRLState),
         VMSTATE_UINT32(reset, STMP3770CLKCTRLState),
         VMSTATE_BOOL(pll_powered, STMP3770CLKCTRLState),
-        VMSTATE_BOOL(pll_locked, STMP3770CLKCTRLState),
         VMSTATE_END_OF_LIST()
     }
 };

@@ -623,6 +623,29 @@ async function testClkctrlFracStableContract() {
   });
 }
 
+async function testClkctrlPllctrl1ReservedContract() {
+  await withMachine(async (machine) => {
+    const reset = await machine.readl(CLKCTRL_BASE + 0x010);
+    assert.equal(reset, 0x00000000, `CLKCTRL PLLCTRL1 should reset to 0: got 0x${reset.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x000, 0x00010000);
+    const afterPllPowerOn = await machine.readl(CLKCTRL_BASE + 0x010);
+    assert.equal(
+      afterPllPowerOn,
+      0x00000000,
+      `CLKCTRL PLLCTRL1 LOCK/LOCK_COUNT are reserved and should stay 0 after PLL power-on: got 0x${afterPllPowerOn.toString(16)}`,
+    );
+
+    await machine.writel(CLKCTRL_BASE + 0x010, 0xffffffff);
+    const afterWrite = await machine.readl(CLKCTRL_BASE + 0x010);
+    assert.equal(
+      afterWrite,
+      0x40000000,
+      `CLKCTRL PLLCTRL1 should only expose the documented FORCE_LOCK writable bit: got 0x${afterWrite.toString(16)}`,
+    );
+  });
+}
+
 async function testOcotpBankOpenContract() {
   await withMachine(async (machine) => {
     await machine.writel(OCOTP_BASE + 0x000, 0x3e770000);
@@ -729,6 +752,7 @@ const tests = [
   ['CLKCTRL gated divider contract', testClkctrlGatedDividerContract],
   ['CLKCTRL writable field masks', testClkctrlWritableFieldMasks],
   ['CLKCTRL FRAC stable contract', testClkctrlFracStableContract],
+  ['CLKCTRL PLLCTRL1 reserved contract', testClkctrlPllctrl1ReservedContract],
   ['OCOTP bank-open contract', testOcotpBankOpenContract],
   ['OCOTP lock and shadow contract', testOcotpLockAndShadowContract],
 ];
