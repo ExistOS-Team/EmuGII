@@ -24,5 +24,6 @@
 OBJECT_DECLARE_SIMPLE_TYPE(STMP3770DIGCTLState, STMP3770_DIGCTL)
 
 uint32_t stmp3770_digctl_get_mpte_loc(STMP3770DIGCTLState *s, int idx);
+void stmp3770_digctl_dig_reset(STMP3770DIGCTLState *s);
 
 #endif /* HW_MISC_STMP3770_DIGCTL_H */

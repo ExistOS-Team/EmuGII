@@ -664,6 +664,14 @@ static void stmp3770_digctl_reset(DeviceState *dev)
     }
 }
 
+void stmp3770_digctl_dig_reset(STMP3770DIGCTLState *s)
+{
+    uint32_t por_only_ctrl = s->ctrl & CTRL_DEBUG_DISABLE;
+
+    stmp3770_digctl_reset(DEVICE(s));
+    s->ctrl |= por_only_ctrl;
+}
+
 static void stmp3770_digctl_init(Object *obj)
 {
     STMP3770DIGCTLState *s = STMP3770_DIGCTL(obj);

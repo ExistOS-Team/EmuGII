@@ -462,6 +462,14 @@ async function testDigctlCtrlBehaviorContract() {
       `DIGCTL CTRL.DEBUG_DISABLE should stay set until reset: got 0x${ctrlAfterDebugDisableClear.toString(16)}`,
     );
 
+    await machine.writel(CLKCTRL_BASE + 0x0f0, 0x00000001);
+    const ctrlAfterDigReset = await machine.readl(DIGCTL_BASE + 0x000);
+    assert.equal(
+      ctrlAfterDigReset,
+      0x0000000c,
+      `DIGCTL CTRL.DEBUG_DISABLE should survive RESET.DIG and only recover after power-on/chip reset: got 0x${ctrlAfterDigReset.toString(16)}`,
+    );
+
     const entropyLatchedReset = await machine.readl(DIGCTL_BASE + 0x0a0);
     assert.equal(
       entropyLatchedReset,

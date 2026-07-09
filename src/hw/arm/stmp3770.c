@@ -120,7 +120,7 @@ static void stmp3770_dig_reset(void *opaque)
 
     device_cold_reset(DEVICE(s->icoll));
     device_cold_reset(DEVICE(s->clkctrl));
-    device_cold_reset(DEVICE(s->digctl));
+    stmp3770_digctl_dig_reset(s->digctl);
     device_cold_reset(DEVICE(s->pinctrl));
     device_cold_reset(DEVICE(s->timer));
     device_cold_reset(DEVICE(s->ocotp));
