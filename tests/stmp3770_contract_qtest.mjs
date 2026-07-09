@@ -680,6 +680,69 @@ async function testClkctrlResetSelfClears() {
   });
 }
 
+async function testClkctrlDividerRangeContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(CLKCTRL_BASE + 0x020, 0x00030002);
+    let cpu = await machine.readl(CLKCTRL_BASE + 0x020);
+    assert.equal(cpu, 0x00030002, `CLKCTRL CPU should accept valid DIV_XTAL/DIV_CPU values: got 0x${cpu.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x020, 0x00000002);
+    cpu = await machine.readl(CLKCTRL_BASE + 0x020);
+    assert.equal(cpu, 0x00030002, `CLKCTRL CPU should reject DIV_XTAL=0 and preserve the previous valid divider: got 0x${cpu.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x020, 0x00030000);
+    cpu = await machine.readl(CLKCTRL_BASE + 0x020);
+    assert.equal(cpu, 0x00030002, `CLKCTRL CPU should reject DIV_CPU=0 and preserve the previous valid divider: got 0x${cpu.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x030, 0x00000002);
+    let hbus = await machine.readl(CLKCTRL_BASE + 0x030);
+    assert.equal(hbus, 0x00000002, `CLKCTRL HBUS should accept a valid divider: got 0x${hbus.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x030, 0x00000000);
+    hbus = await machine.readl(CLKCTRL_BASE + 0x030);
+    assert.equal(hbus, 0x00000002, `CLKCTRL HBUS should reject DIV=0 and preserve the previous valid divider: got 0x${hbus.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x040, 0x00000004);
+    let xbus = await machine.readl(CLKCTRL_BASE + 0x040);
+    assert.equal(xbus, 0x00000004, `CLKCTRL XBUS should accept a valid divider: got 0x${xbus.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x040, 0x00000000);
+    xbus = await machine.readl(CLKCTRL_BASE + 0x040);
+    assert.equal(xbus, 0x00000004, `CLKCTRL XBUS should reject DIV=0 and preserve the previous valid divider: got 0x${xbus.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x060, 0x00000028);
+    await machine.writel(CLKCTRL_BASE + 0x060, 0x00000028);
+    let pix = await machine.readl(CLKCTRL_BASE + 0x060);
+    assert.equal(pix, 0x00000028, `CLKCTRL PIX should accept a valid divider once ungated: got 0x${pix.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x060, 0x00000000);
+    pix = await machine.readl(CLKCTRL_BASE + 0x060);
+    assert.equal(pix, 0x00000028, `CLKCTRL PIX should reject DIV=0 and preserve the previous valid divider: got 0x${pix.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x060, 0x00000123);
+    pix = await machine.readl(CLKCTRL_BASE + 0x060);
+    assert.equal(pix, 0x00000028, `CLKCTRL PIX should reject DIV values above 255: got 0x${pix.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x070, 0x00000028);
+    await machine.writel(CLKCTRL_BASE + 0x070, 0x00000028);
+    let ssp = await machine.readl(CLKCTRL_BASE + 0x070);
+    assert.equal(ssp, 0x00000028, `CLKCTRL SSP should accept a valid divider once ungated: got 0x${ssp.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x070, 0x00000000);
+    ssp = await machine.readl(CLKCTRL_BASE + 0x070);
+    assert.equal(ssp, 0x00000028, `CLKCTRL SSP should reject DIV=0 and preserve the previous valid divider: got 0x${ssp.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x080, 0x00000028);
+    await machine.writel(CLKCTRL_BASE + 0x080, 0x00000028);
+    let gpmi = await machine.readl(CLKCTRL_BASE + 0x080);
+    assert.equal(gpmi, 0x00000028, `CLKCTRL GPMI should accept a valid divider once ungated: got 0x${gpmi.toString(16)}`);
+
+    await machine.writel(CLKCTRL_BASE + 0x080, 0x00000000);
+    gpmi = await machine.readl(CLKCTRL_BASE + 0x080);
+    assert.equal(gpmi, 0x00000028, `CLKCTRL GPMI should reject DIV=0 and preserve the previous valid divider: got 0x${gpmi.toString(16)}`);
+  });
+}
+
 async function testOcotpBankOpenContract() {
   await withMachine(async (machine) => {
     await machine.writel(OCOTP_BASE + 0x000, 0x3e770000);
@@ -788,6 +851,7 @@ const tests = [
   ['CLKCTRL FRAC stable contract', testClkctrlFracStableContract],
   ['CLKCTRL PLLCTRL1 reserved contract', testClkctrlPllctrl1ReservedContract],
   ['CLKCTRL reset self-clear contract', testClkctrlResetSelfClears],
+  ['CLKCTRL divider range contract', testClkctrlDividerRangeContract],
   ['OCOTP bank-open contract', testOcotpBankOpenContract],
   ['OCOTP lock and shadow contract', testOcotpLockAndShadowContract],
 ];

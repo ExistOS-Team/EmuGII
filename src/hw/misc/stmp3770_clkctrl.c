@@ -52,7 +52,8 @@
 #define PLLCTRL0_RW_MASK        0x33350000U
 
 /* CPU register bits */
-#define CPU_DIV_CPU_MASK        0x3F
+#define CPU_DIV_CPU_MASK        0x3FF
+#define CPU_DIV_XTAL_MASK       (0x3FF << 16)
 #define CPU_DIV_CPU_FRAC_EN     (1 << 18)
 #define CPU_BUSY_REF_CPU        (1 << 28)
 #define CPU_BUSY_REF_XTAL       (1 << 29)
@@ -169,9 +170,58 @@ static void stmp3770_clkctrl_write_masked(uint32_t *target, uint32_t val,
     *target = (*target & ~writable_mask) | next;
 }
 
+static void stmp3770_clkctrl_restore_invalid_divider(uint32_t *target,
+                                                     uint32_t old,
+                                                     uint32_t div_mask,
+                                                     unsigned shift,
+                                                     uint32_t max_div)
+{
+    uint32_t div = (*target & div_mask) >> shift;
+
+    if (div == 0 || div > max_div) {
+        *target = (*target & ~div_mask) | (old & div_mask);
+    }
+}
+
+static void stmp3770_clkctrl_write_cpu(uint32_t *target, uint32_t val,
+                                       bool is_set, bool is_clr, bool is_tog)
+{
+    uint32_t old = *target;
+
+    stmp3770_clkctrl_write_masked(target, val, CPU_RW_MASK,
+                                  is_set, is_clr, is_tog);
+    stmp3770_clkctrl_restore_invalid_divider(target, old, CPU_DIV_XTAL_MASK,
+                                             16, 0x3FF);
+    stmp3770_clkctrl_restore_invalid_divider(target, old, CPU_DIV_CPU_MASK,
+                                             0, 0x3FF);
+}
+
+static void stmp3770_clkctrl_write_hbus(uint32_t *target, uint32_t val,
+                                        bool is_set, bool is_clr, bool is_tog)
+{
+    uint32_t old = *target;
+
+    stmp3770_clkctrl_write_masked(target, val, HBUS_RW_MASK,
+                                  is_set, is_clr, is_tog);
+    stmp3770_clkctrl_restore_invalid_divider(target, old, HBUS_DIV_MASK,
+                                             0, HBUS_DIV_MASK);
+}
+
+static void stmp3770_clkctrl_write_xbus(uint32_t *target, uint32_t val,
+                                        bool is_set, bool is_clr, bool is_tog)
+{
+    uint32_t old = *target;
+
+    stmp3770_clkctrl_write_masked(target, val, XBUS_RW_MASK,
+                                  is_set, is_clr, is_tog);
+    stmp3770_clkctrl_restore_invalid_divider(target, old, PERCLK_DIV_MASK_10,
+                                             0, PERCLK_DIV_MASK_10);
+}
+
 static void stmp3770_clkctrl_write_perclk(uint32_t *target, uint32_t val,
                                           uint32_t writable_mask,
                                           uint32_t div_mask,
+                                          uint32_t max_div,
                                           bool is_set, bool is_clr, bool is_tog)
 {
     uint32_t current = *target;
@@ -190,6 +240,8 @@ static void stmp3770_clkctrl_write_perclk(uint32_t *target, uint32_t val,
 
     stmp3770_clkctrl_write_masked(target, val, writable_mask,
                                   is_set, is_clr, is_tog);
+    stmp3770_clkctrl_restore_invalid_divider(target, current, div_mask,
+                                             0, max_div);
 }
 
 static void stmp3770_clkctrl_write_frac(uint32_t *target, uint32_t val,
@@ -328,20 +380,17 @@ static void stmp3770_clkctrl_write(void *opaque, hwaddr offset,
 
     case REG_CPU:
         target = &s->cpu;
-        stmp3770_clkctrl_write_masked(target, val, CPU_RW_MASK,
-                                      is_set, is_clr, is_tog);
+        stmp3770_clkctrl_write_cpu(target, val, is_set, is_clr, is_tog);
         return;
 
     case REG_HBUS:
         target = &s->hbus;
-        stmp3770_clkctrl_write_masked(target, val, HBUS_RW_MASK,
-                                      is_set, is_clr, is_tog);
+        stmp3770_clkctrl_write_hbus(target, val, is_set, is_clr, is_tog);
         return;
 
     case REG_XBUS:
         target = &s->xbus;
-        stmp3770_clkctrl_write_masked(target, val, XBUS_RW_MASK,
-                                      is_set, is_clr, is_tog);
+        stmp3770_clkctrl_write_xbus(target, val, is_set, is_clr, is_tog);
         return;
 
     case REG_XTAL:
@@ -355,6 +404,7 @@ static void stmp3770_clkctrl_write(void *opaque, hwaddr offset,
         target = &s->pix;
         stmp3770_clkctrl_write_perclk(target, val, PIX_RW_MASK,
                                       PERCLK_DIV_MASK_15,
+                                      0xFF,
                                       is_set, is_clr, is_tog);
         return;
 
@@ -362,12 +412,14 @@ static void stmp3770_clkctrl_write(void *opaque, hwaddr offset,
         target = &s->ssp;
         stmp3770_clkctrl_write_perclk(target, val, SSP_RW_MASK,
                                       PERCLK_DIV_MASK_9,
+                                      PERCLK_DIV_MASK_9,
                                       is_set, is_clr, is_tog);
         return;
 
     case REG_GPMI:
         target = &s->gpmi;
         stmp3770_clkctrl_write_perclk(target, val, GPMI_RW_MASK,
+                                      PERCLK_DIV_MASK_10,
                                       PERCLK_DIV_MASK_10,
                                       is_set, is_clr, is_tog);
         return;
