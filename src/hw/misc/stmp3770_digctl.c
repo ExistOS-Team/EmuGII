@@ -101,6 +101,7 @@
 
 /* CTRL register bits (7.4.1) */
 #define CTRL_LATCH_ENTROPY      (1 << 0)
+#define CTRL_DEBUG_DISABLE      (1 << 3)
 #define CTRL_USB_CLKGATE        (1 << 2)
 #define CTRL_RW_MASK            0x20FFF87FU
 
@@ -234,6 +235,11 @@ static uint32_t digctl_microseconds_get(STMP3770DIGCTLState *s)
     return s->microseconds + elapsed_us;
 }
 
+static uint32_t digctl_entropy_get(STMP3770DIGCTLState *s)
+{
+    return (uint32_t)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+}
+
 static void digctl_microseconds_set(STMP3770DIGCTLState *s, uint32_t value)
 {
     s->microseconds = value;
@@ -319,7 +325,7 @@ static uint64_t stmp3770_digctl_read(void *opaque, hwaddr offset, unsigned size)
 
     case REG_ENTROPY:
         /* Return a pseudo-entropy value derived from the QEMU clock */
-        value = (uint32_t)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        value = digctl_entropy_get(s);
         break;
 
     case REG_ENTROPY_LATCHED:
@@ -423,6 +429,7 @@ static void stmp3770_digctl_write(void *opaque, hwaddr offset,
     uint32_t *target = NULL;
     uint32_t writable_mask = 0xFFFFFFFFU;
     uint32_t old_ctrl = 0;
+    bool latch_entropy = false;
     hwaddr reg = offset & ~0xFULL;
 
     if ((is_set || is_clr || is_tog) && !digctl_has_sct_alias(reg)) {
@@ -589,11 +596,24 @@ static void stmp3770_digctl_write(void *opaque, hwaddr offset,
     if (target) {
         digctl_write_masked(target, val, writable_mask, is_set, is_clr, is_tog);
 
-        if (offset == REG_CTRL &&
-            !(old_ctrl & CTRL_LATCH_ENTROPY) &&
-            (s->ctrl & CTRL_LATCH_ENTROPY)) {
-            s->entropy_latched =
-                (uint32_t)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        if (offset == REG_CTRL) {
+            if ((old_ctrl & CTRL_DEBUG_DISABLE) ||
+                (s->ctrl & CTRL_DEBUG_DISABLE)) {
+                s->ctrl |= CTRL_DEBUG_DISABLE;
+            }
+
+            if ((is_set && (val & CTRL_LATCH_ENTROPY)) ||
+                (!is_set && !is_clr && !is_tog &&
+                 (val & CTRL_LATCH_ENTROPY)) ||
+                (is_tog && (val & CTRL_LATCH_ENTROPY) &&
+                 !(old_ctrl & CTRL_LATCH_ENTROPY) &&
+                 (s->ctrl & CTRL_LATCH_ENTROPY))) {
+                latch_entropy = true;
+            }
+        }
+
+        if (latch_entropy) {
+            s->entropy_latched = digctl_entropy_get(s);
         }
     }
 }

@@ -440,6 +440,54 @@ async function testDigctlUndocumentedAliasDecode() {
   });
 }
 
+async function testDigctlCtrlBehaviorContract() {
+  await withMachine(async (machine) => {
+    const ctrlReset = await machine.readl(DIGCTL_BASE + 0x000);
+    assert.equal(ctrlReset, 0x00000004, `DIGCTL CTRL should reset with only USB_CLKGATE set: got 0x${ctrlReset.toString(16)}`);
+
+    await machine.writel(DIGCTL_BASE + 0x004, 0x00000008);
+    const ctrlAfterDebugDisableSet = await machine.readl(DIGCTL_BASE + 0x000);
+    assert.equal(
+      ctrlAfterDebugDisableSet,
+      0x0000000c,
+      `DIGCTL CTRL.DEBUG_DISABLE should latch high when set: got 0x${ctrlAfterDebugDisableSet.toString(16)}`,
+    );
+
+    await machine.writel(DIGCTL_BASE + 0x008, 0x00000008);
+    const ctrlAfterDebugDisableClear = await machine.readl(DIGCTL_BASE + 0x000);
+    assert.equal(
+      ctrlAfterDebugDisableClear,
+      0x0000000c,
+      `DIGCTL CTRL.DEBUG_DISABLE should stay set until reset: got 0x${ctrlAfterDebugDisableClear.toString(16)}`,
+    );
+
+    const entropyLatchedReset = await machine.readl(DIGCTL_BASE + 0x0a0);
+    assert.equal(
+      entropyLatchedReset,
+      0,
+      `DIGCTL ENTROPY_LATCHED should reset to 0: got 0x${entropyLatchedReset.toString(16)}`,
+    );
+
+    await machine.clockStep(1_000_000);
+    await machine.writel(DIGCTL_BASE + 0x004, 0x00000001);
+    const entropyLatched1 = await machine.readl(DIGCTL_BASE + 0x0a0);
+    assert.notEqual(
+      entropyLatched1,
+      0,
+      `DIGCTL CTRL.LATCH_ENTROPY should latch the live entropy value on first set: got 0x${entropyLatched1.toString(16)}`,
+    );
+
+    await machine.clockStep(1_000_000);
+    await machine.writel(DIGCTL_BASE + 0x004, 0x00000001);
+    const entropyLatched2 = await machine.readl(DIGCTL_BASE + 0x0a0);
+    assert.notEqual(
+      entropyLatched2,
+      entropyLatched1,
+      `DIGCTL CTRL.LATCH_ENTROPY should re-latch on repeated set writes: first=0x${entropyLatched1.toString(16)} second=0x${entropyLatched2.toString(16)}`,
+    );
+  });
+}
+
 async function testOcotpBankOpenContract() {
   await withMachine(async (machine) => {
     await machine.writel(OCOTP_BASE + 0x000, 0x3e770000);
@@ -541,6 +589,7 @@ const tests = [
   ['DIGCTL writable field masks', testDigctlWritableFieldMasks],
   ['DIGCTL scratch and microseconds contract', testDigctlScratchAndMicrosecondsContract],
   ['DIGCTL undocumented alias decode', testDigctlUndocumentedAliasDecode],
+  ['DIGCTL ctrl behavior contract', testDigctlCtrlBehaviorContract],
   ['OCOTP bank-open contract', testOcotpBankOpenContract],
   ['OCOTP lock and shadow contract', testOcotpLockAndShadowContract],
 ];
