@@ -60,12 +60,28 @@ static void stmp3770_ssp_update_irq(STMP3770SSPState *s)
                  (pending & s->ctrl1 & SSP_CTRL1_ERROR_IRQ_ENABLE_MASK) != 0);
 }
 
+static void stmp3770_ssp_complete_data_word(STMP3770SSPState *s)
+{
+    if (s->words_remaining == 0) {
+        return;
+    }
+
+    s->words_remaining--;
+    if (s->words_remaining == 0) {
+        s->ctrl0 &= ~SSP_CTRL0_RUN;
+        s->status |= SSP_STATUS_FIFO_EMPTY;
+        s->status &= ~(SSP_STATUS_BUSY | SSP_STATUS_CMD_BUSY |
+                       SSP_STATUS_DATA_BUSY);
+    }
+}
+
 static void stmp3770_ssp_reset(DeviceState *dev)
 {
     STMP3770SSPState *s = STMP3770_SSP(dev);
 
     s->ctrl0 = SSP_CTRL0_RESET_VALUE;
     s->ctrl1 = SSP_CTRL1_RESET_VALUE;
+    s->words_remaining = 0;
     s->cmd0 = 0;
     s->cmd1 = 0;
     s->compref = 0;
@@ -109,10 +125,14 @@ static uint64_t stmp3770_ssp_read(void *opaque, hwaddr offset, unsigned size)
     case SSP_TIMING:
         return s->timing;
     case SSP_DATA:
-        if (s->status & SSP_STATUS_FIFO_EMPTY) {
+        if ((s->ctrl0 & SSP_CTRL0_RUN) && stmp3770_ssp_enabled(s) &&
+            (s->status & SSP_STATUS_FIFO_EMPTY)) {
             s->status |= SSP_STATUS_FIFO_UNDRFLW;
             s->ctrl1 |= SSP_CTRL1_FIFO_UNDERRUN_IRQ;
             stmp3770_ssp_update_irq(s);
+        }
+        if ((s->ctrl0 & SSP_CTRL0_RUN) && stmp3770_ssp_enabled(s)) {
+            stmp3770_ssp_complete_data_word(s);
         }
         return s->data;
     case SSP_SDRESP0:
@@ -154,18 +174,21 @@ static void stmp3770_ssp_write(void *opaque, hwaddr offset,
 
     switch (offset) {
     case SSP_CTRL0:
+    {
+        uint32_t old_ctrl0 = s->ctrl0;
+
         stmp3770_ssp_apply_sct(&s->ctrl0, (uint32_t)value, sct);
         if (s->ctrl0 & SSP_CTRL0_SFTRST) {
             stmp3770_ssp_reset(DEVICE(s));
-        }
-        if ((s->ctrl0 & SSP_CTRL0_RUN) && stmp3770_ssp_enabled(s)) {
-            /* Stub: complete transfer immediately */
-            s->ctrl0 &= ~SSP_CTRL0_RUN;
-            s->status |= SSP_STATUS_FIFO_EMPTY;
-            s->status &= ~(SSP_STATUS_BUSY | SSP_STATUS_CMD_BUSY |
-                           SSP_STATUS_DATA_BUSY);
+        } else if (!(old_ctrl0 & SSP_CTRL0_RUN) &&
+                   (s->ctrl0 & SSP_CTRL0_RUN)) {
+            s->words_remaining = s->ctrl0 & 0xffffU;
+            if (s->words_remaining == 0) {
+                s->ctrl0 &= ~SSP_CTRL0_RUN;
+            }
         }
         break;
+    }
     case SSP_CTRL1:
         stmp3770_ssp_apply_sct(&s->ctrl1, (uint32_t)value, sct);
         stmp3770_ssp_update_irq(s);
@@ -187,6 +210,9 @@ static void stmp3770_ssp_write(void *opaque, hwaddr offset,
         break;
     case SSP_DATA:
         s->data = (uint32_t)value;
+        if ((s->ctrl0 & SSP_CTRL0_RUN) && stmp3770_ssp_enabled(s)) {
+            stmp3770_ssp_complete_data_word(s);
+        }
         break;
     case SSP_SDRESP0:
     case SSP_SDRESP1:
@@ -225,10 +251,23 @@ static void stmp3770_ssp_init(Object *obj)
     sysbus_init_irq(sbd, &s->irq_error);
 }
 
+static int stmp3770_ssp_post_load(void *opaque, int version_id)
+{
+    STMP3770SSPState *s = STMP3770_SSP(opaque);
+
+    if (version_id < 2 && (s->ctrl0 & SSP_CTRL0_RUN)) {
+        s->words_remaining = s->ctrl0 & 0xffffU;
+    }
+    stmp3770_ssp_update_irq(s);
+
+    return 0;
+}
+
 static const VMStateDescription vmstate_stmp3770_ssp = {
     .name = "stmp3770-ssp",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
+    .post_load = stmp3770_ssp_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(ctrl0, STMP3770SSPState),
         VMSTATE_UINT32(ctrl1, STMP3770SSPState),
@@ -241,6 +280,7 @@ static const VMStateDescription vmstate_stmp3770_ssp = {
         VMSTATE_UINT32_ARRAY(sdresp, STMP3770SSPState, 4),
         VMSTATE_UINT32(status, STMP3770SSPState),
         VMSTATE_UINT32(debug, STMP3770SSPState),
+        VMSTATE_UINT32_V(words_remaining, STMP3770SSPState, 2),
         VMSTATE_END_OF_LIST()
     }
 };

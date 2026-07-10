@@ -76,6 +76,7 @@ struct STMP3770SSPState {
 
     uint32_t ctrl0;
     uint32_t ctrl1;
+    uint32_t words_remaining;
     uint32_t cmd0;
     uint32_t cmd1;
     uint32_t compref;

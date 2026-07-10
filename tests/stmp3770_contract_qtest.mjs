@@ -1902,15 +1902,33 @@ async function testSspDataEmptyReadContract() {
     await machine.writel(SSP1_BASE + 0x068, 1 << 21);
 
     assert.equal(await machine.readl(SSP1_BASE + 0x070), 0, 'SSP DATA empty read must return zeroed FIFO content');
+    assert.equal(
+      (await machine.readl(SSP1_BASE + 0x060)) & (1 << 21),
+      0,
+      'SSP DATA reads must not advance or underflow the FIFO while RUN is clear',
+    );
+    assert.equal(
+      (await machine.readl(SSP1_BASE + 0x0c0)) & (1 << 4),
+      0,
+      'SSP STATUS.FIFO_UNDRFLW must remain clear while RUN is clear',
+    );
+
+    await machine.writel(SSP1_BASE + 0x004, 1 << 29);
+    assert.equal(await machine.readl(SSP1_BASE + 0x070), 0, 'SSP DATA empty read must return zeroed FIFO content');
     assert.notEqual(
       (await machine.readl(SSP1_BASE + 0x060)) & (1 << 21),
       0,
-      'SSP DATA empty read must raise FIFO_UNDERRUN_IRQ',
+      'SSP DATA empty read must raise FIFO_UNDERRUN_IRQ when RUN is set',
     );
     assert.notEqual(
       (await machine.readl(SSP1_BASE + 0x0c0)) & (1 << 4),
       0,
-      'SSP DATA empty read must expose STATUS.FIFO_UNDRFLW',
+      'SSP DATA empty read must expose STATUS.FIFO_UNDRFLW when RUN is set',
+    );
+    assert.equal(
+      (await machine.readl(SSP1_BASE + 0x000)) & (1 << 29),
+      0,
+      'SSP RUN must clear after the reset XFER_COUNT of one word completes',
     );
   });
 }
