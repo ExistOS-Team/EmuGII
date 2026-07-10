@@ -436,6 +436,28 @@ async function testRtcAnalogSecondsRunWhileDigitalClockGated() {
   });
 }
 
+async function testRtcMsecResolutionContract() {
+  await withMachine(async (machine) => {
+    const resolutions = [1, 2, 4, 8, 16];
+
+    await machine.writel(RTC_BASE + 0x008, 0xc0000000);
+    await machine.clockStep(3_000_000);
+
+    for (const resolution of resolutions) {
+      await machine.writel(RTC_BASE + 0x060, resolution << 8);
+      await machine.clockStep(3_000_000);
+      const before = await machine.readl(RTC_BASE + 0x020);
+
+      await machine.clockStep(resolution * 8 * 1_000_000);
+      assert.equal(
+        await machine.readl(RTC_BASE + 0x020),
+        before + 8,
+        `RTC MSEC_RES=${resolution} must advance the counter once per ${resolution} ms`,
+      );
+    }
+  });
+}
+
 async function testTimrotTickAndUpdateContract() {
   await withMachine(async (machine) => {
     await machine.writel(TIMROT_BASE + 0x008, 0xc0000000);
@@ -2216,6 +2238,7 @@ const tests = [
   ['RTC suppress copy-to-analog contract', testRtcSuppressCopyToAnalogContract],
   ['RTC analog state survives chip reset', testRtcAnalogStateSurvivesChipReset],
   ['RTC analog seconds run while digital clock gated', testRtcAnalogSecondsRunWhileDigitalClockGated],
+  ['RTC millisecond resolution contract', testRtcMsecResolutionContract],
   ['TIMROT tick and update contract', testTimrotTickAndUpdateContract],
   ['PWM register contract', testPwmRegisterContract],
   ['PWM waveform contract', testPwmWaveformContract],

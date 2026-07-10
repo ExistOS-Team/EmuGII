@@ -47,6 +47,7 @@ struct STMP3770RTCState {
     uint32_t analog_persistent[STMP3770_RTC_NUM_PERSISTENT];
     bool analog_initialized;
     uint16_t analog_msec_phase;
+    uint8_t msec_resolution_phase;
     uint8_t copy_to_shadow;
     uint8_t copy_to_analog;
 

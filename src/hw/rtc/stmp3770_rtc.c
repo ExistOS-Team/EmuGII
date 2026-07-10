@@ -91,6 +91,25 @@
 #define PERSISTENT0_ALARM_WAKE_EN   (1U << 1)
 #define PERSISTENT0_CLOCKSOURCE     (1U << 0)
 #define PERSISTENT0_WRITABLE_MASK   0xFFFFFFFFU
+#define PERSISTENT0_MSEC_RES_SHIFT   8
+#define PERSISTENT0_MSEC_RES_MASK    0x1F
+
+static uint8_t stmp3770_rtc_msec_resolution(const STMP3770RTCState *s)
+{
+    uint32_t resolution = (s->persistent[0] >> PERSISTENT0_MSEC_RES_SHIFT) &
+                          PERSISTENT0_MSEC_RES_MASK;
+
+    switch (resolution) {
+    case 1:
+    case 2:
+    case 4:
+    case 8:
+    case 16:
+        return resolution;
+    default:
+        return 1;
+    }
+}
 
 static inline bool stmp3770_rtc_enabled(STMP3770RTCState *s)
 {
@@ -219,7 +238,10 @@ static void stmp3770_rtc_tick(void *opaque)
     if (!stmp3770_rtc_enabled(s)) {
         return;
     }
-    s->milliseconds++;
+    if (++s->msec_resolution_phase >= stmp3770_rtc_msec_resolution(s)) {
+        s->msec_resolution_phase = 0;
+        s->milliseconds++;
+    }
 
     if (s->ctrl & CTRL_ONEMSEC_IRQ_EN) {
         s->ctrl |= CTRL_ONEMSEC_IRQ;
@@ -462,6 +484,7 @@ static void stmp3770_rtc_reset(DeviceState *dev)
     s->ctrl = CTRL_SFTRST | CTRL_CLKGATE | CTRL_FORCE_UPDATE;
     s->stat = STAT_STALE_REGS_MASK << STAT_STALE_REGS_SHIFT;
     s->milliseconds = 0;
+    s->msec_resolution_phase = 0;
     s->seconds = 0;
     s->alarm = 0;
     s->watchdog = 0xFFFFFFFF;
@@ -530,13 +553,16 @@ static int stmp3770_rtc_post_load(void *opaque, int version_id)
     if (version_id < 4) {
         s->analog_msec_phase = s->milliseconds % 1000;
     }
+    if (version_id < 5) {
+        s->msec_resolution_phase = 0;
+    }
     stmp3770_rtc_rearm_copy_timer(s);
     return 0;
 }
 
 static const VMStateDescription vmstate_stmp3770_rtc = {
     .name = TYPE_STMP3770_RTC,
-    .version_id = 4,
+    .version_id = 5,
     .minimum_version_id = 1,
     .post_load = stmp3770_rtc_post_load,
     .fields = (const VMStateField[]) {
@@ -557,6 +583,7 @@ static const VMStateDescription vmstate_stmp3770_rtc = {
                                STMP3770_RTC_NUM_PERSISTENT, 2),
         VMSTATE_BOOL_V(analog_initialized, STMP3770RTCState, 3),
         VMSTATE_UINT16_V(analog_msec_phase, STMP3770RTCState, 4),
+        VMSTATE_UINT8_V(msec_resolution_phase, STMP3770RTCState, 5),
         VMSTATE_UINT8_V(copy_to_shadow, STMP3770RTCState, 2),
         VMSTATE_UINT8_V(copy_to_analog, STMP3770RTCState, 2),
         VMSTATE_TIMER_PTR_V(copy_timer, STMP3770RTCState, 2),
