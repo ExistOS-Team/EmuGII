@@ -1491,6 +1491,90 @@ async function testUsbCapabilityRegisterContract() {
   });
 }
 
+async function testUsbDeviceControlContract() {
+  await withMachine(async (machine) => {
+    assert.equal(await machine.readl(USB_BASE + 0x140), 0x00080000);
+    assert.equal(await machine.readl(USB_BASE + 0x144), 0x00000000);
+    assert.equal(await machine.readl(USB_BASE + 0x148), 0x00000000);
+    assert.equal(await machine.readl(USB_BASE + 0x160), 0x00001010);
+    assert.equal(await machine.readl(USB_BASE + 0x1a4), 0x00000020);
+    assert.equal(await machine.readl(USB_BASE + 0x1a8), 0x00000000);
+    assert.equal(
+      (await machine.readl(USB_BASE + 0x184)) & 0x00001005,
+      0,
+      'USBCTRL PORTSC1 must not report a powered, enabled, or connected port at reset',
+    );
+
+    await machine.writel(USB_BASE + 0x148, 0xffffffff);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x148),
+      0x030d05ff,
+      'USBCTRL USBINTR must retain only the Table 278 interrupt-enable fields',
+    );
+
+    await machine.writel(USB_BASE + 0x154, 0xffffffff);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x154),
+      0xff000000,
+      'USBCTRL DEVICEADDR must retain only USBADR and USBADRA',
+    );
+    await machine.writel(USB_BASE + 0x158, 0xffffffff);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x158),
+      0xfffff800,
+      'USBCTRL ENDPTLISTADDR must preserve its 2 KiB alignment',
+    );
+    await machine.writel(USB_BASE + 0x15c, 0xffffffff);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x15c),
+      0x7f000000,
+      'USBCTRL TTCTRL must retain only TTHA[30:24]',
+    );
+    await machine.writel(USB_BASE + 0x160, 0xffffffff);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x160),
+      0x0000ffff,
+      'USBCTRL BURSTSIZE must retain only TXPBURST and RXPBURST',
+    );
+
+    await machine.writel(USB_BASE + 0x1a8, 0xffffffff);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x1a8),
+      0x0000003f,
+      'USBCTRL USBMODE must retain its six documented control bits',
+    );
+    await machine.writel(USB_BASE + 0x1a8, 0x00000000);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x1a8),
+      0x0000003f,
+      'USBCTRL USBMODE must ignore subsequent writes until controller reset',
+    );
+
+    await machine.writel(USB_BASE + 0x140, 0x00000002);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x140),
+      0x00080000,
+      'USBCTRL USBCMD.RST must self-clear into the device-mode reset value',
+    );
+    assert.equal(await machine.readl(USB_BASE + 0x144), 0x00000000);
+    assert.equal(await machine.readl(USB_BASE + 0x148), 0x00000000);
+    assert.equal(await machine.readl(USB_BASE + 0x154), 0x00000000);
+    assert.equal(await machine.readl(USB_BASE + 0x158), 0x00000000);
+    assert.equal(await machine.readl(USB_BASE + 0x15c), 0x00000000);
+    assert.equal(await machine.readl(USB_BASE + 0x160), 0x00001010);
+    assert.equal(await machine.readl(USB_BASE + 0x1a4), 0x00000020);
+    assert.equal(await machine.readl(USB_BASE + 0x1a8), 0x00000000);
+
+    await machine.writel(USB_BASE + 0x1a8, 0x00000002);
+    await machine.writel(USB_BASE + 0x1a8, 0x00000003);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x1a8),
+      0x00000002,
+      'USBCTRL controller reset must permit exactly one new USBMODE selection',
+    );
+  });
+}
+
 async function testLcdifDataAccessContract() {
   await withMachine(async (machine) => {
     const ctrl = 0x00030001;
@@ -2858,6 +2942,7 @@ const tests = [
   ['LCDIF first read dummy contract', testLcdifFirstReadDummyContract],
   ['USBPHY register contract', testUsbPhyRegisterContract],
   ['USBCTRL capability register contract', testUsbCapabilityRegisterContract],
+  ['USBCTRL device control contract', testUsbDeviceControlContract],
   ['LCDIF data access contract', testLcdifDataAccessContract],
   ['PINCTRL Bank 3 absence', testPinctrlBank3Absent],
   ['ICOLL core contract', testIcollCoreContract],

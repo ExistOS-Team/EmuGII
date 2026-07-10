@@ -76,7 +76,15 @@
 #define USBSTS_UEI          (1U << 1)
 #define USBSTS_UI           (1U << 0)
 
-#define USBMODE_DEVICE      0x2
+#define USBCTRL_USBCMD_DEVICE_RESET     0x00080000
+#define USBCTRL_BURSTSIZE_RESET         0x00001010
+#define USBCTRL_OTGSC_DEVICE_RESET      0x00000020
+#define USBCTRL_USBINTR_WRITABLE_MASK   0x030D05FF
+#define USBCTRL_DEVICEADDR_WRITABLE_MASK 0xFF000000
+#define USBCTRL_ENDPTLISTADDR_WRITABLE_MASK 0xFFFFF800
+#define USBCTRL_TTCTRL_WRITABLE_MASK    0x7F000000
+#define USBCTRL_BURSTSIZE_WRITABLE_MASK 0x0000FFFF
+#define USBCTRL_USBMODE_WRITABLE_MASK   0x0000003F
 
 #define USBCTRL_ID_RESET            0x0042FA05
 #define USBCTRL_ARC_GENERAL_RESET   0x00000015
@@ -88,14 +96,10 @@
 #define USBCTRL_HCCPARAMS_RESET     0x00000006
 #define USBCTRL_DCCPARAMS_RESET     0x00000185
 
-#define PORTSC1_PTS         (1U << 30)
 #define PORTSC1_PP          (1U << 12)
 #define PORTSC1_PR          (1U << 8)
 #define PORTSC1_PE          (1U << 2)
 #define PORTSC1_CCS         (1U << 0)
-
-#define OTGSC_BSEIS         (1U << 12)
-#define OTGSC_BSEIE         (1U << 4)
 
 static void usb_update_irq(STMP3770USBState *s)
 {
@@ -107,6 +111,33 @@ static void usb_update_irq(STMP3770USBState *s)
     }
 
     qemu_set_irq(s->irq, pending);
+}
+
+static void usb_controller_reset(STMP3770USBState *s)
+{
+    s->usbcmd = USBCTRL_USBCMD_DEVICE_RESET;
+    s->usbsts = 0;
+    s->usbintr = 0;
+    s->frindex = 0;
+    s->device_addr = 0;
+    s->endptlistaddr = 0;
+    s->asynclistaddr = 0;
+    s->ttctrl = 0;
+    s->burstsize = USBCTRL_BURSTSIZE_RESET;
+    s->txfilltuning = 0;
+    s->endptnak = 0;
+    s->endptnaken = 0;
+    s->portsc1 = 0;
+    s->otgsc = USBCTRL_OTGSC_DEVICE_RESET;
+    s->usbmode = 0;
+    s->usbmode_written = false;
+    s->endptsetupstat = 0;
+    s->endptprime = 0;
+    s->endptflush = 0;
+    s->endptstat = 0;
+    s->endptcomplete = 0;
+    memset(s->endptctrl, 0, sizeof(s->endptctrl));
+    memset(s->gptimer, 0, sizeof(s->gptimer));
 }
 
 static uint64_t usb_read(void *opaque, hwaddr offset, unsigned size)
@@ -184,7 +215,7 @@ static uint64_t usb_read(void *opaque, hwaddr offset, unsigned size)
     case REG_ENDPTLISTADDR:
         return s->endptlistaddr;
     case REG_TTCTRL:
-        return 0;
+        return s->ttctrl;
     case REG_BURSTSIZE:
         return s->burstsize;
     case REG_TXFILLTUNING:
@@ -239,19 +270,8 @@ static void usb_write(void *opaque, hwaddr offset,
     case REG_USBCMD:
         s->usbcmd = (uint32_t)value;
         if (s->usbcmd & USBCMD_RST) {
-            s->usbsts = USBSTS_URI;
-            s->frindex = 0;
-            s->device_addr = 0;
-            s->endptlistaddr = 0;
-            s->endptnak = 0;
-            s->endptsetupstat = 0;
-            s->endptprime = 0;
-            s->endptflush = 0;
-            s->endptstat = 0;
-            s->endptcomplete = 0;
-            memset(s->endptctrl, 0, sizeof(s->endptctrl));
+            usb_controller_reset(s);
         }
-        s->usbcmd &= ~USBCMD_RST;
         usb_update_irq(s);
         break;
     case REG_USBSTS:
@@ -261,20 +281,24 @@ static void usb_write(void *opaque, hwaddr offset,
         usb_update_irq(s);
         break;
     case REG_USBINTR:
-        s->usbintr = (uint32_t)value;
+        s->usbintr = (uint32_t)value & USBCTRL_USBINTR_WRITABLE_MASK;
         usb_update_irq(s);
         break;
     case REG_FRINDEX:
         s->frindex = (uint32_t)value & 0x3FFF;
         break;
     case REG_DEVICEADDR:
-        s->device_addr = (uint32_t)value;
+        s->device_addr = (uint32_t)value & USBCTRL_DEVICEADDR_WRITABLE_MASK;
         break;
     case REG_ENDPTLISTADDR:
-        s->endptlistaddr = (uint32_t)value;
+        s->endptlistaddr = (uint32_t)value &
+                           USBCTRL_ENDPTLISTADDR_WRITABLE_MASK;
+        break;
+    case REG_TTCTRL:
+        s->ttctrl = (uint32_t)value & USBCTRL_TTCTRL_WRITABLE_MASK;
         break;
     case REG_BURSTSIZE:
-        s->burstsize = (uint32_t)value;
+        s->burstsize = (uint32_t)value & USBCTRL_BURSTSIZE_WRITABLE_MASK;
         break;
     case REG_TXFILLTUNING:
         s->txfilltuning = (uint32_t)value;
@@ -300,7 +324,10 @@ static void usb_write(void *opaque, hwaddr offset,
         s->otgsc = (uint32_t)value;
         break;
     case REG_USBMODE:
-        s->usbmode = (uint32_t)value & 0x7;
+        if (!s->usbmode_written) {
+            s->usbmode = (uint32_t)value & USBCTRL_USBMODE_WRITABLE_MASK;
+            s->usbmode_written = true;
+        }
         break;
     case REG_ENDPTSETUPSTAT:
         s->endptsetupstat &= ~((uint32_t)value & 0xFFFF);
@@ -346,27 +373,7 @@ static void usb_reset(DeviceState *dev)
 {
     STMP3770USBState *s = STMP3770_USB(dev);
 
-    s->usbcmd = 0;
-    s->usbsts = USBSTS_URI;
-    s->usbintr = 0;
-    s->frindex = 0;
-    s->device_addr = 0;
-    s->endptlistaddr = 0;
-    s->asynclistaddr = 0;
-    s->burstsize = 0x00040404;
-    s->txfilltuning = 0;
-    s->endptnak = 0;
-    s->endptnaken = 0;
-    s->portsc1 = PORTSC1_PP | PORTSC1_PE | PORTSC1_CCS;
-    s->otgsc = OTGSC_BSEIS;  /* B-session end: peripheral connected */
-    s->usbmode = USBMODE_DEVICE;
-    s->endptsetupstat = 0;
-    s->endptprime = 0;
-    s->endptflush = 0;
-    s->endptstat = 0;
-    s->endptcomplete = 0;
-    memset(s->endptctrl, 0, sizeof(s->endptctrl));
-    memset(s->gptimer, 0, sizeof(s->gptimer));
+    usb_controller_reset(s);
 
     usb_update_irq(s);
 }
@@ -384,7 +391,7 @@ static void usb_realize(DeviceState *dev, Error **errp)
 
 static const VMStateDescription vmstate_usb = {
     .name = "stmp3770-usb",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(usbcmd, STMP3770USBState),
@@ -394,6 +401,7 @@ static const VMStateDescription vmstate_usb = {
         VMSTATE_UINT32(device_addr, STMP3770USBState),
         VMSTATE_UINT32(endptlistaddr, STMP3770USBState),
         VMSTATE_UINT32(asynclistaddr, STMP3770USBState),
+        VMSTATE_UINT32_V(ttctrl, STMP3770USBState, 2),
         VMSTATE_UINT32(burstsize, STMP3770USBState),
         VMSTATE_UINT32(txfilltuning, STMP3770USBState),
         VMSTATE_UINT32(endptnak, STMP3770USBState),
@@ -401,6 +409,7 @@ static const VMStateDescription vmstate_usb = {
         VMSTATE_UINT32(portsc1, STMP3770USBState),
         VMSTATE_UINT32(otgsc, STMP3770USBState),
         VMSTATE_UINT32(usbmode, STMP3770USBState),
+        VMSTATE_BOOL_V(usbmode_written, STMP3770USBState, 2),
         VMSTATE_UINT32(endptsetupstat, STMP3770USBState),
         VMSTATE_UINT32(endptprime, STMP3770USBState),
         VMSTATE_UINT32(endptflush, STMP3770USBState),
@@ -417,10 +426,7 @@ static void usb_init(Object *obj)
 {
     STMP3770USBState *s = STMP3770_USB(obj);
 
-    s->usbmode = USBMODE_DEVICE;
-    s->portsc1 = PORTSC1_PP | PORTSC1_PE | PORTSC1_CCS;
-    s->otgsc = OTGSC_BSEIS;
-    s->usbsts = USBSTS_URI;
+    usb_controller_reset(s);
 }
 
 static void usb_class_init(ObjectClass *oc, const void *data)

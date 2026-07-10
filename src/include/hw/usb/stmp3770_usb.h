@@ -34,6 +34,7 @@ struct STMP3770USBState {
     uint32_t device_addr;
     uint32_t endptlistaddr;
     uint32_t asynclistaddr;
+    uint32_t ttctrl;
     uint32_t burstsize;
     uint32_t txfilltuning;
     uint32_t endptnak;
@@ -41,6 +42,7 @@ struct STMP3770USBState {
     uint32_t portsc1;
     uint32_t otgsc;
     uint32_t usbmode;
+    bool usbmode_written;
     uint32_t endptsetupstat;
     uint32_t endptprime;
     uint32_t endptflush;
