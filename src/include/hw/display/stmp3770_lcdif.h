@@ -59,6 +59,9 @@ struct STMP3770LCDIFState {
     uint32_t vdctrl1;
     uint32_t vdctrl2;
     uint32_t vdctrl3;
+    uint32_t hw_timing;
+    uint32_t vdctrl[4];
+    uint32_t dvctrl[4];
     uint32_t irq;
     uint32_t irq_en;
 

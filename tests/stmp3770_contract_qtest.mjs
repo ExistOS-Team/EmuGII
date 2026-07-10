@@ -1132,6 +1132,59 @@ async function testLcdifCtrl1Layout() {
   });
 }
 
+async function testLcdifRegisterMapContract() {
+  await withMachine(async (machine) => {
+    assert.equal(
+      await machine.readl(LCDIF_BASE + 0x010),
+      0x000f0000,
+      'LCDIF CTRL1 reset must retain BYTE_PACKING_FORMAT=0xf',
+    );
+    assert.equal(
+      await machine.readl(LCDIF_BASE + 0x0c0),
+      0x90000000,
+      'LCDIF STAT reset must report PRESENT and RXFIFO_EMPTY only',
+    );
+    assert.equal(
+      await machine.readl(LCDIF_BASE + 0x0d0),
+      0x02000000,
+      'LCDIF VERSION must report Reference Manual v2.0',
+    );
+    assert.equal(
+      await machine.readl(LCDIF_BASE + 0x0e0),
+      0x0e810000,
+      'LCDIF DEBUG0 reset fields must be read-only Reference defaults',
+    );
+
+    const cases = [
+      [0x020, 0xffffffff, 0xffffffff, 'TIMING'],
+      [0x030, 0xffffffff, 0x3f3803ff, 'VDCTRL0'],
+      [0x040, 0xffffffff, 0xffffffff, 'VDCTRL1'],
+      [0x050, 0xffffffff, 0xffffffff, 'VDCTRL2'],
+      [0x060, 0xffffffff, 0x01fff1ff, 'VDCTRL3'],
+      [0x070, 0xffffffff, 0xffffffff, 'DVICTRL0'],
+      [0x080, 0xffffffff, 0x3fffffff, 'DVICTRL1'],
+      [0x090, 0xffffffff, 0x3fffffff, 'DVICTRL2'],
+      [0x0a0, 0xffffffff, 0x03ff03ff, 'DVICTRL3'],
+    ];
+
+    for (const [offset, value, expected, name] of cases) {
+      await machine.writel(LCDIF_BASE + offset, value);
+      assert.equal(
+        await machine.readl(LCDIF_BASE + offset),
+        expected,
+        `LCDIF ${name} must decode at its PDF address and preserve only documented fields`,
+      );
+    }
+
+    await machine.writel(LCDIF_BASE + 0x034, 0xffffffff);
+    assert.equal(
+      await machine.readl(LCDIF_BASE + 0x030),
+      0x3f3803ff,
+      'LCDIF VDCTRL0 SET alias must operate only on documented fields',
+    );
+  });
+}
+
 async function testPinctrlBank3Absent() {
   await withMachine(async (machine) => {
     const ctrl = await machine.readl(PINCTRL_BASE + 0x000);
@@ -2467,6 +2520,7 @@ const tests = [
   ['Application UART register contract', testAppUartRegisterContract],
   ['Debug UART register contract', testDebugUartRegisterContract],
   ['LCDIF CTRL1 interrupt layout', testLcdifCtrl1Layout],
+  ['LCDIF register map contract', testLcdifRegisterMapContract],
   ['PINCTRL Bank 3 absence', testPinctrlBank3Absent],
   ['ICOLL core contract', testIcollCoreContract],
   ['ICOLL vector acknowledge contract', testIcollVectorAcknowledgeContract],

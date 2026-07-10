@@ -31,7 +31,7 @@
 #include "hw/display/framebuffer.h"
 #include "hw/display/stmp3770_lcdif.h"
 
-#define LCDIF_VERSION   0x01000000
+#define LCDIF_VERSION   0x02000000
 
 /* Register offsets */
 #define REG_CTRL0       0x000
@@ -42,28 +42,40 @@
 #define REG_CTRL1_SET   0x014
 #define REG_CTRL1_CLR   0x018
 #define REG_CTRL1_TOG   0x01C
-#define REG_TRANSFER_COUNT 0x020
-#define REG_CUR_BUF     0x030
-#define REG_NEXT_BUF    0x040
-#define REG_PAGETABLE   0x050
-#define REG_VDCTRL4     0x060
-#define REG_VDCTRL0     0x070
-#define REG_DVICTRL2    0x080
-#define REG_DVICTRL3    0x090
-#define REG_DVICTRL4    0x0A0
+#define REG_TIMING      0x020
+#define REG_VDCTRL0     0x030
+#define REG_VDCTRL0_SET 0x034
+#define REG_VDCTRL0_CLR 0x038
+#define REG_VDCTRL0_TOG 0x03C
+#define REG_VDCTRL1     0x040
+#define REG_VDCTRL2     0x050
+#define REG_VDCTRL3     0x060
+#define REG_DVICTRL0    0x070
+#define REG_DVICTRL1    0x080
+#define REG_DVICTRL2    0x090
+#define REG_DVICTRL3    0x0A0
 #define REG_DATA        0x0B0
 #define REG_STAT        0x0C0
 #define REG_VERSION     0x0D0
+#define REG_DEBUG0      0x0E0
 
 /* CTRL0 bits */
 #define CTRL0_SFTRST    (1U << 31)
 #define CTRL0_CLKGATE   (1U << 30)
 #define CTRL0_READ_WRITEB (1U << 29)
+#define CTRL0_WAIT_FOR_VSYNC_EDGE (1U << 28)
+#define CTRL0_DATA_SHIFT_DIR (1U << 27)
+#define CTRL0_SHIFT_NUM_BITS_MASK (3U << 25)
+#define CTRL0_DVI_MODE (1U << 24)
+#define CTRL0_BYPASS_COUNT (1U << 23)
+#define CTRL0_DATA_SWIZZLE_MASK (3U << 21)
+#define CTRL0_VSYNC_MODE (1U << 20)
 #define CTRL0_DOTCLK_MODE (1U << 19)
 #define CTRL0_DATA_SELECT (1U << 18)
 #define CTRL0_WORD_LENGTH (1U << 17)
 #define CTRL0_RUN       (1U << 16)
 #define CTRL0_COUNT_MASK 0xFFFF
+#define CTRL0_WRITABLE_MASK 0xFFFFFFFFU
 
 /* CTRL1 bits */
 #define CTRL1_OVERFLOW_IRQ_EN       (1U << 15)
@@ -80,6 +92,13 @@
                            CTRL1_VSYNC_EDGE_IRQ_EN)
 #define CTRL1_IRQ_MASK    (CTRL1_OVERFLOW_IRQ | CTRL1_UNDERFLOW_IRQ | \
                            CTRL1_CUR_FRAME_DONE_IRQ | CTRL1_VSYNC_EDGE_IRQ)
+#define CTRL1_WRITABLE_MASK 0x000FFFFFU
+#define CTRL1_RESET_VALUE (0xFU << 16)
+
+#define VDCTRL0_WRITABLE_MASK 0x3F3803FFU
+#define VDCTRL3_WRITABLE_MASK 0x01FFF1FFU
+#define DVICTRL1_WRITABLE_MASK 0x3FFFFFFFU
+#define DVICTRL3_WRITABLE_MASK 0x03FF03FFU
 
 /* IRQ bits */
 #define IRQ_VSYNC           (1U << 0)
@@ -96,6 +115,8 @@
 #define STAT_TXFIFO_EMPTY   (1U << 26)
 #define STAT_BUSY           (1U << 25)
 #define STAT_DVI_CURRENT_FIELD (1U << 24)
+#define STAT_RESET_VALUE (STAT_PRESENT | STAT_RXFIFO_EMPTY)
+#define DEBUG0_RESET_VALUE 0x0E810000U
 
 #define REFRESH_RATE_HZ     60
 #define NS_PER_SEC          1000000000ULL
@@ -1171,24 +1192,24 @@ static uint64_t lcdif_read(void *opaque, hwaddr offset, unsigned size)
         return s->ctrl0;
     case REG_CTRL1:
         return (s->ctrl1 & ~CTRL1_IRQ_MASK) | lcdif_irq_to_ctrl1(s->irq);
-    case REG_TRANSFER_COUNT:
-        return s->timing[0];
-    case REG_CUR_BUF:
-        return s->cur_buf;
-    case REG_NEXT_BUF:
-        return s->next_buf;
-    case REG_PAGETABLE:
-        return s->timing[1];
-    case REG_VDCTRL4:
-        return s->timing[2];
+    case REG_TIMING:
+        return s->hw_timing;
     case REG_VDCTRL0:
-        return s->vdctrl0;
+        return s->vdctrl[0];
+    case REG_VDCTRL1:
+        return s->vdctrl[1];
+    case REG_VDCTRL2:
+        return s->vdctrl[2];
+    case REG_VDCTRL3:
+        return s->vdctrl[3];
+    case REG_DVICTRL0:
+        return s->dvctrl[0];
+    case REG_DVICTRL1:
+        return s->dvctrl[1];
     case REG_DVICTRL2:
-        return s->timing[3];
+        return s->dvctrl[2];
     case REG_DVICTRL3:
-        return s->vdctrl1;
-    case REG_DVICTRL4:
-        return s->vdctrl2;
+        return s->dvctrl[3];
     case REG_DATA:
     {
         uint8_t data[4];
@@ -1199,10 +1220,11 @@ static uint64_t lcdif_read(void *opaque, hwaddr offset, unsigned size)
                ((uint32_t)data[3] << 24);
     }
     case REG_STAT:
-        /* Report FIFOs as empty and controller as not busy */
-        return STAT_PRESENT | STAT_RXFIFO_EMPTY | STAT_TXFIFO_EMPTY;
+        return STAT_RESET_VALUE;
     case REG_VERSION:
         return LCDIF_VERSION;
+    case REG_DEBUG0:
+        return DEBUG0_RESET_VALUE;
     default:
         qemu_log_mask(LOG_GUEST_ERROR,
                       "stmp3770-lcdif: read from unimplemented offset "
@@ -1225,9 +1247,9 @@ static void lcdif_write(void *opaque, hwaddr offset,
         return;
     }
 
-    switch (base) {
-    case REG_CTRL0:
-        lcdif_apply_sct(&s->ctrl0, (uint32_t)value, sct);
+    if (base == REG_CTRL0) {
+        lcdif_apply_sct(&s->ctrl0, (uint32_t)value & CTRL0_WRITABLE_MASK,
+                        sct);
         /*
          * Hardware ties CLKGATE to SFTRST: asserting reset automatically
          * gates the clock, so firmware polls CLKGATE after setting SFTRST.
@@ -1237,9 +1259,12 @@ static void lcdif_write(void *opaque, hwaddr offset,
         } else {
             s->ctrl0 &= ~CTRL0_CLKGATE;
         }
-        break;
-    case REG_CTRL1:
-        lcdif_apply_sct(&s->ctrl1, (uint32_t)value, sct);
+        return;
+    }
+
+    if (base == REG_CTRL1) {
+        lcdif_apply_sct(&s->ctrl1, (uint32_t)value & CTRL1_WRITABLE_MASK,
+                        sct);
         if (sct == 0) {
             s->irq = lcdif_ctrl1_status_to_irq(s->ctrl1);
         } else if (sct == 1) {
@@ -1252,36 +1277,46 @@ static void lcdif_write(void *opaque, hwaddr offset,
         s->ctrl1 = (s->ctrl1 & ~CTRL1_IRQ_MASK) | lcdif_irq_to_ctrl1(s->irq);
         s->irq_en = lcdif_ctrl1_to_irq_en(s->ctrl1);
         lcdif_update_irq(s);
+        return;
+    }
+
+    if (base == REG_VDCTRL0) {
+        lcdif_apply_sct(&s->vdctrl[0],
+                        (uint32_t)value & VDCTRL0_WRITABLE_MASK, sct);
+        return;
+    }
+
+    if (sct != 0) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "stmp3770-lcdif: write to undocumented alias "
+                      HWADDR_FMT_plx "\n", offset);
+        return;
+    }
+
+    switch (offset) {
+    case REG_TIMING:
+        s->hw_timing = (uint32_t)value;
         break;
-    case REG_TRANSFER_COUNT:
-        s->timing[0] = (uint32_t)value;
-        s->width = (int)(value & 0xFFFF);
-        s->height = (int)((value >> 16) & 0xFFFF);
+    case REG_VDCTRL1:
+        s->vdctrl[1] = (uint32_t)value;
         break;
-    case REG_CUR_BUF:
-        s->cur_buf = (uint32_t)value;
+    case REG_VDCTRL2:
+        s->vdctrl[2] = (uint32_t)value;
         break;
-    case REG_NEXT_BUF:
-        s->next_buf = (uint32_t)value;
-        s->cur_buf = s->next_buf;
+    case REG_VDCTRL3:
+        s->vdctrl[3] = (uint32_t)value & VDCTRL3_WRITABLE_MASK;
         break;
-    case REG_PAGETABLE:
-        s->timing[1] = (uint32_t)value;
+    case REG_DVICTRL0:
+        s->dvctrl[0] = (uint32_t)value;
         break;
-    case REG_VDCTRL4:
-        s->timing[2] = (uint32_t)value;
-        break;
-    case REG_VDCTRL0:
-        s->vdctrl0 = (uint32_t)value;
+    case REG_DVICTRL1:
+        s->dvctrl[1] = (uint32_t)value & DVICTRL1_WRITABLE_MASK;
         break;
     case REG_DVICTRL2:
-        s->timing[3] = (uint32_t)value;
+        s->dvctrl[2] = (uint32_t)value & DVICTRL1_WRITABLE_MASK;
         break;
     case REG_DVICTRL3:
-        s->vdctrl1 = (uint32_t)value;
-        break;
-    case REG_DVICTRL4:
-        s->vdctrl2 = (uint32_t)value;
+        s->dvctrl[3] = (uint32_t)value & DVICTRL3_WRITABLE_MASK;
         break;
     case REG_DATA:
     {
@@ -1297,7 +1332,8 @@ static void lcdif_write(void *opaque, hwaddr offset,
     }
     case REG_STAT:
     case REG_VERSION:
-        /* Read-only; SET/CLR/TOG aliases are harmless */
+    case REG_DEBUG0:
+        /* Read-only. */
         break;
     default:
         qemu_log_mask(LOG_GUEST_ERROR,
@@ -1385,7 +1421,7 @@ static void lcdif_reset(DeviceState *dev)
     STMP3770LCDIFState *s = STMP3770_LCDIF(dev);
 
     s->ctrl0 = CTRL0_SFTRST | CTRL0_CLKGATE;
-    s->ctrl1 = 0;
+    s->ctrl1 = CTRL1_RESET_VALUE;
     s->cur_buf = 0;
     s->next_buf = 0;
     memset(s->timing, 0, sizeof(s->timing));
@@ -1393,6 +1429,9 @@ static void lcdif_reset(DeviceState *dev)
     s->vdctrl1 = 0;
     s->vdctrl2 = 0;
     s->vdctrl3 = 0;
+    s->hw_timing = 0;
+    memset(s->vdctrl, 0, sizeof(s->vdctrl));
+    memset(s->dvctrl, 0, sizeof(s->dvctrl));
     s->irq = 0;
     s->irq_en = 0;
     s->width = 0;
@@ -1455,7 +1494,7 @@ static void lcdif_realize(DeviceState *dev, Error **errp)
 
 static const VMStateDescription vmstate_lcdif = {
     .name = "stmp3770-lcdif",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(ctrl0, STMP3770LCDIFState),
@@ -1467,6 +1506,9 @@ static const VMStateDescription vmstate_lcdif = {
         VMSTATE_UINT32(vdctrl1, STMP3770LCDIFState),
         VMSTATE_UINT32(vdctrl2, STMP3770LCDIFState),
         VMSTATE_UINT32(vdctrl3, STMP3770LCDIFState),
+        VMSTATE_UINT32_V(hw_timing, STMP3770LCDIFState, 2),
+        VMSTATE_UINT32_ARRAY_V(vdctrl, STMP3770LCDIFState, 4, 2),
+        VMSTATE_UINT32_ARRAY_V(dvctrl, STMP3770LCDIFState, 4, 2),
         VMSTATE_UINT32(irq, STMP3770LCDIFState),
         VMSTATE_UINT32(irq_en, STMP3770LCDIFState),
         VMSTATE_UINT32(dma_pio_ctrl, STMP3770LCDIFState),
