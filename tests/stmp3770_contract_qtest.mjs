@@ -24,6 +24,7 @@ const POWER_BASE = 0x80044000;
 const RTC_BASE = 0x8005c000;
 const PWM_BASE = 0x80064000;
 const TIMROT_BASE = 0x80068000;
+const USBPHY_BASE = 0x8007c000;
 const LRADC_BASE = 0x80050000;
 const I2C_BASE = 0x80058000;
 const APPUART_BASE = 0x8006c000;
@@ -1362,6 +1363,83 @@ async function testLcdifFirstReadDummyContract() {
       await machine.readb(LCDIF_BASE + 0x0b0),
       0x22,
       'LCDIF FIRST_READ_DUMMY must discard the initial panel response before filling the read FIFO',
+    );
+  });
+}
+
+async function testUsbPhyRegisterContract() {
+  await withMachine(async (machine) => {
+    const resetValues = [
+      [0x000, 0x001f7c00, 'PWD'],
+      [0x010, 0x10060607, 'TX'],
+      [0x020, 0x00000000, 'RX'],
+      [0x030, 0xc0000001, 'CTRL'],
+      [0x040, 0x00000000, 'STATUS'],
+      [0x050, 0x7f180000, 'DEBUG'],
+      [0x060, 0x0000900d, 'DEBUG0_STATUS'],
+      [0x070, 0x00001000, 'DEBUG1'],
+      [0x080, 0x00000000, 'VERSION'],
+    ];
+
+    for (const [offset, expected, name] of resetValues) {
+      assert.equal(
+        await machine.readl(USBPHY_BASE + offset),
+        expected,
+        `USBPHY ${name} must decode at its PDF address and reset to its documented value`,
+      );
+    }
+
+    const writable = [
+      [0x000, 0x001f7c00, 'PWD'],
+      [0x010, 0x1faf2f8f, 'TX'],
+      [0x020, 0x00400033, 'RX'],
+      [0x050, 0x7f1f1f3f, 'DEBUG'],
+      [0x070, 0x0000700f, 'DEBUG1'],
+    ];
+
+    for (const [offset, expected, name] of writable) {
+      await machine.writel(USBPHY_BASE + offset, 0);
+      await machine.writel(USBPHY_BASE + offset + 0x004, 0xffffffff);
+      assert.equal(
+        await machine.readl(USBPHY_BASE + offset),
+        expected,
+        `USBPHY ${name}_SET must preserve only documented writable fields`,
+      );
+      await machine.writel(USBPHY_BASE + offset + 0x008, 0xffffffff);
+      assert.equal(
+        await machine.readl(USBPHY_BASE + offset),
+        0,
+        `USBPHY ${name}_CLR must clear documented writable fields`,
+      );
+    }
+
+    await machine.writel(USBPHY_BASE + 0x040, 0xffffffff);
+    assert.equal(
+      await machine.readl(USBPHY_BASE + 0x040),
+      0x00000100,
+      'USBPHY STATUS must expose OTGID_STATUS as its sole writable field',
+    );
+
+    await machine.writel(USBPHY_BASE + 0x050, 0);
+    await machine.writel(USBPHY_BASE + 0x038, 0x80000000);
+    assert.equal(
+      ((await machine.readl(USBPHY_BASE + 0x030)) & 0xc0000000) >>> 0,
+      0x40000000,
+      'USBPHY clearing SFTRST must preserve a separately gated clock',
+    );
+    await machine.writel(USBPHY_BASE + 0x034, 0x80000000);
+    assert.equal(await machine.readl(USBPHY_BASE + 0x000), 0x001f7c00);
+    assert.equal(await machine.readl(USBPHY_BASE + 0x010), 0x10060607);
+    assert.equal(await machine.readl(USBPHY_BASE + 0x020), 0);
+    assert.equal(
+      ((await machine.readl(USBPHY_BASE + 0x030)) & 0xc0000001) >>> 0,
+      0xc0000001,
+      'USBPHY SFTRST must restore CTRL together with PWD/TX/RX',
+    );
+    assert.equal(
+      await machine.readl(USBPHY_BASE + 0x050),
+      0,
+      'USBPHY SFTRST must not reset DEBUG outside its documented reset domain',
     );
   });
 }
@@ -2731,6 +2809,7 @@ const tests = [
   ['LCDIF FIFO status contract', testLcdifFifoStatusContract],
   ['LCDIF streaming end contract', testLcdifStreamingEndContract],
   ['LCDIF first read dummy contract', testLcdifFirstReadDummyContract],
+  ['USBPHY register contract', testUsbPhyRegisterContract],
   ['LCDIF data access contract', testLcdifDataAccessContract],
   ['PINCTRL Bank 3 absence', testPinctrlBank3Absent],
   ['ICOLL core contract', testIcollCoreContract],

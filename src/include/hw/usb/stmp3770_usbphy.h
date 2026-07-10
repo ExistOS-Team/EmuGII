@@ -24,9 +24,13 @@ struct STMP3770USBPHYState {
 
     MemoryRegion iomem;
 
-    uint32_t ctrl0;
+    uint32_t pwd;
+    uint32_t tx;
+    uint32_t rx;
+    uint32_t ctrl;
     uint32_t status;
     uint32_t debug;
+    uint32_t debug1;
 };
 
 #endif /* STMP3770_USBPHY_H */

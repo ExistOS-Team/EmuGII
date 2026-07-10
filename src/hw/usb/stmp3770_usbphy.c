@@ -1,7 +1,7 @@
 /*
  * STMP3770 USB PHY emulation
  *
- * Based on STMP3770 Reference Manual Chapter 17
+ * Based on STMP3770 Reference Manual Chapter 10
  *
  * Copyright (C) 2024
  *
@@ -19,33 +19,34 @@
 #include "qemu/module.h"
 #include "hw/usb/stmp3770_usbphy.h"
 
-#define USBPHY_VERSION      0x43000000
+#define REG_PWD             0x000
+#define REG_TX              0x010
+#define REG_RX              0x020
+#define REG_CTRL            0x030
+#define REG_STATUS          0x040
+#define REG_DEBUG           0x050
+#define REG_DEBUG0_STATUS   0x060
+#define REG_DEBUG1          0x070
+#define REG_VERSION         0x080
 
-#define REG_CTRL0           0x000
-#define REG_CTRL0_SET       0x004
-#define REG_CTRL0_CLR       0x008
-#define REG_CTRL0_TOG       0x00C
-#define REG_STATUS          0x010
-#define REG_DEBUG           0x020
-#define REG_DEBUG_SET       0x024
-#define REG_DEBUG_CLR       0x028
-#define REG_DEBUG_TOG       0x02C
-#define REG_VERSION         0x030
-#define REG_VERSION_SET     0x034
-#define REG_VERSION_CLR     0x038
-#define REG_VERSION_TOG     0x03C
+#define PWD_WRITABLE_MASK   0x001F7C00U
+#define TX_WRITABLE_MASK    0x1FAF2F8FU
+#define RX_WRITABLE_MASK    0x00400033U
+#define CTRL_SFTRST         (1U << 31)
+#define CTRL_CLKGATE        (1U << 30)
+#define CTRL_UTMI_SUSPENDM  (1U << 29)
+#define CTRL_WRITABLE_MASK  0xD0003EBFU
+#define DEBUG_WRITABLE_MASK 0x7F1F1F3FU
+#define DEBUG1_WRITABLE_MASK 0x0000700FU
+#define STATUS_OTGID_STATUS (1U << 8)
 
-#define CTRL0_SFTRST        (1U << 31)
-#define CTRL0_CLKGATE       (1U << 30)
-#define CTRL0_UTMI_SUSPENDM (1U << 29)
-#define CTRL0_HOSTDISCON    (1U << 21)
-#define CTRL0_ENDEDGDETECT  (1U << 20)
-#define CTRL0_ENHOSTDISCON  (1U << 21)
-
-#define STATUS_HOSTDISCON   (1U << 3)
-#define STATUS_DEVPLUGIN    (1U << 2)
-#define STATUS_OTGID        (1U << 1)
-#define STATUS_DCDETECTED   (1U << 0)
+#define PWD_RESET_VALUE     0x001F7C00U
+#define TX_RESET_VALUE      0x10060607U
+#define RX_RESET_VALUE      0x00000000U
+#define CTRL_RESET_VALUE    0xC0000001U
+#define DEBUG_RESET_VALUE   0x7F180000U
+#define DEBUG0_STATUS_RESET_VALUE 0x0000900DU
+#define DEBUG1_RESET_VALUE  0x00001000U
 
 static void usbphy_apply_sct(uint32_t *reg, uint32_t value, int sct)
 {
@@ -65,6 +66,32 @@ static void usbphy_apply_sct(uint32_t *reg, uint32_t value, int sct)
     }
 }
 
+static void usbphy_reset_registers(STMP3770USBPHYState *s)
+{
+    s->pwd = PWD_RESET_VALUE;
+    s->tx = TX_RESET_VALUE;
+    s->rx = RX_RESET_VALUE;
+    s->ctrl = CTRL_RESET_VALUE;
+}
+
+static void usbphy_cold_reset(STMP3770USBPHYState *s)
+{
+    usbphy_reset_registers(s);
+    s->status = 0;
+    s->debug = DEBUG_RESET_VALUE;
+    s->debug1 = DEBUG1_RESET_VALUE;
+}
+
+static uint32_t usbphy_ctrl_read(STMP3770USBPHYState *s)
+{
+    uint32_t ctrl = s->ctrl & ~CTRL_UTMI_SUSPENDM;
+
+    if ((s->pwd & PWD_WRITABLE_MASK) != PWD_WRITABLE_MASK) {
+        ctrl |= CTRL_UTMI_SUSPENDM;
+    }
+    return ctrl;
+}
+
 static uint64_t usbphy_read(void *opaque, hwaddr offset, unsigned size)
 {
     STMP3770USBPHYState *s = opaque;
@@ -77,15 +104,25 @@ static uint64_t usbphy_read(void *opaque, hwaddr offset, unsigned size)
     }
 
     switch (offset) {
-    case REG_CTRL0:
-        return s->ctrl0;
+    case REG_PWD:
+        return s->pwd;
+    case REG_TX:
+        return s->tx;
+    case REG_RX:
+        return s->rx;
+    case REG_CTRL:
+        return usbphy_ctrl_read(s);
     case REG_STATUS:
         /* Report a connected B-device (peripheral) */
         return s->status;
     case REG_DEBUG:
         return s->debug;
+    case REG_DEBUG0_STATUS:
+        return DEBUG0_STATUS_RESET_VALUE;
+    case REG_DEBUG1:
+        return s->debug1;
     case REG_VERSION:
-        return USBPHY_VERSION;
+        return 0;
     default:
         qemu_log_mask(LOG_GUEST_ERROR,
                       "stmp3770-usbphy: read from unimplemented offset "
@@ -107,24 +144,45 @@ static void usbphy_write(void *opaque, hwaddr offset,
         return;
     }
 
-    if ((offset & ~0xC) == REG_CTRL0) {
-        usbphy_apply_sct(&s->ctrl0, (uint32_t)value, sct);
-        /* Hardware ties CLKGATE to SFTRST */
-        if (s->ctrl0 & CTRL0_SFTRST) {
-            s->ctrl0 |= CTRL0_CLKGATE;
-        } else {
-            s->ctrl0 &= ~CTRL0_CLKGATE;
+    if ((offset & ~0xC) == REG_PWD) {
+        usbphy_apply_sct(&s->pwd, (uint32_t)value & PWD_WRITABLE_MASK, sct);
+        return;
+    }
+
+    if ((offset & ~0xC) == REG_TX) {
+        usbphy_apply_sct(&s->tx, (uint32_t)value & TX_WRITABLE_MASK, sct);
+        return;
+    }
+
+    if ((offset & ~0xC) == REG_RX) {
+        usbphy_apply_sct(&s->rx, (uint32_t)value & RX_WRITABLE_MASK, sct);
+        return;
+    }
+
+    if ((offset & ~0xC) == REG_CTRL) {
+        usbphy_apply_sct(&s->ctrl, (uint32_t)value & CTRL_WRITABLE_MASK,
+                         sct);
+        if (s->ctrl & CTRL_SFTRST) {
+            usbphy_reset_registers(s);
         }
         return;
     }
 
     if ((offset & ~0xC) == REG_DEBUG) {
-        usbphy_apply_sct(&s->debug, (uint32_t)value, sct);
+        usbphy_apply_sct(&s->debug, (uint32_t)value & DEBUG_WRITABLE_MASK,
+                         sct);
         return;
     }
 
-    if ((offset & ~0xC) == REG_VERSION) {
-        /* VERSION is read-only; SET/CLR/TOG aliases are harmless no-ops */
+    if ((offset & ~0xC) == REG_DEBUG1) {
+        usbphy_apply_sct(&s->debug1,
+                         (uint32_t)value & DEBUG1_WRITABLE_MASK, sct);
+        return;
+    }
+
+    if (offset == REG_STATUS) {
+        s->status = (s->status & ~STATUS_OTGID_STATUS) |
+                    ((uint32_t)value & STATUS_OTGID_STATUS);
         return;
     }
 
@@ -147,9 +205,7 @@ static void usbphy_reset(DeviceState *dev)
 {
     STMP3770USBPHYState *s = STMP3770_USBPHY(dev);
 
-    s->ctrl0 = CTRL0_SFTRST | CTRL0_CLKGATE;
-    s->status = STATUS_DEVPLUGIN | STATUS_DCDETECTED;
-    s->debug = 0;
+    usbphy_cold_reset(s);
 }
 
 static void usbphy_realize(DeviceState *dev, Error **errp)
@@ -164,12 +220,16 @@ static void usbphy_realize(DeviceState *dev, Error **errp)
 
 static const VMStateDescription vmstate_usbphy = {
     .name = "stmp3770-usbphy",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
-        VMSTATE_UINT32(ctrl0, STMP3770USBPHYState),
+        VMSTATE_UINT32(ctrl, STMP3770USBPHYState),
         VMSTATE_UINT32(status, STMP3770USBPHYState),
         VMSTATE_UINT32(debug, STMP3770USBPHYState),
+        VMSTATE_UINT32_V(pwd, STMP3770USBPHYState, 2),
+        VMSTATE_UINT32_V(tx, STMP3770USBPHYState, 2),
+        VMSTATE_UINT32_V(rx, STMP3770USBPHYState, 2),
+        VMSTATE_UINT32_V(debug1, STMP3770USBPHYState, 2),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -178,9 +238,7 @@ static void usbphy_init(Object *obj)
 {
     STMP3770USBPHYState *s = STMP3770_USBPHY(obj);
 
-    s->ctrl0 = CTRL0_SFTRST | CTRL0_CLKGATE;
-    s->status = STATUS_DEVPLUGIN | STATUS_DCDETECTED;
-    s->debug = 0;
+    usbphy_cold_reset(s);
 }
 
 static void usbphy_class_init(ObjectClass *oc, const void *data)
