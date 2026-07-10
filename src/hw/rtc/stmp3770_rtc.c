@@ -196,7 +196,6 @@ static void stmp3770_rtc_check_alarm(STMP3770RTCState *s)
     if ((s->persistent[0] & PERSISTENT0_ALARM_EN) &&
         s->seconds == s->alarm) {
         s->ctrl |= CTRL_ALARM_IRQ;
-        s->persistent[0] |= PERSISTENT0_ALARM_WAKE;
         stmp3770_rtc_update_irq(s);
     }
 }

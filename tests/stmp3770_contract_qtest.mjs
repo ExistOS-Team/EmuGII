@@ -331,6 +331,22 @@ async function testRtcWatchdogDebugContract() {
   });
 }
 
+async function testRtcAlarmWakeContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(RTC_BASE + 0x008, 0xc0000000);
+    await machine.clockStep(3_000_000);
+    await machine.writel(RTC_BASE + 0x040, 1);
+    await machine.writel(RTC_BASE + 0x064, 0x00000004);
+    await machine.writel(RTC_BASE + 0x030, 1);
+
+    assert.equal(
+      (await machine.readl(RTC_BASE + 0x060)) & 0x80,
+      0,
+      'RTC ALARM_WAKE must remain clear when an alarm occurs while the chip is powered up',
+    );
+  });
+}
+
 async function testTimrotTickAndUpdateContract() {
   await withMachine(async (machine) => {
     await machine.writel(TIMROT_BASE + 0x008, 0xc0000000);
@@ -2030,6 +2046,7 @@ const tests = [
   ['RTC copy controller contract', testRtcCopyControllerContract],
   ['RTC clock gate contract', testRtcClockGateContract],
   ['RTC watchdog debug contract', testRtcWatchdogDebugContract],
+  ['RTC alarm wake contract', testRtcAlarmWakeContract],
   ['TIMROT tick and update contract', testTimrotTickAndUpdateContract],
   ['PWM register contract', testPwmRegisterContract],
   ['I2C register contract', testI2cRegisterContract],
