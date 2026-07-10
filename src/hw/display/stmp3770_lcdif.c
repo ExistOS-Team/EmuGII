@@ -1264,6 +1264,33 @@ static void lcdif_data_swizzle(STMP3770LCDIFState *s, uint8_t data[4],
     *valid_bytes = valid;
 }
 
+static void lcdif_data_shift(STMP3770LCDIFState *s, uint8_t data[4])
+{
+    unsigned int shift = (s->ctrl0 & CTRL0_SHIFT_NUM_BITS_MASK) >> 25;
+    unsigned int i;
+
+    if (!shift) {
+        return;
+    }
+
+    if (s->ctrl0 & CTRL0_WORD_LENGTH) {
+        for (i = 0; i < 4; i++) {
+            data[i] = (s->ctrl0 & CTRL0_DATA_SHIFT_DIR) ?
+                      data[i] >> shift : data[i] << shift;
+        }
+        return;
+    }
+
+    for (i = 0; i < 4; i += 2) {
+        uint16_t word = data[i] | ((uint16_t)data[i + 1] << 8);
+
+        word = (s->ctrl0 & CTRL0_DATA_SHIFT_DIR) ?
+               word >> shift : word << shift;
+        data[i] = word;
+        data[i + 1] = word >> 8;
+    }
+}
+
 static unsigned int lcdif_panel_write_packed(STMP3770LCDIFState *s,
                                              uint8_t data[4],
                                              uint8_t valid_bytes,
@@ -1276,6 +1303,7 @@ static unsigned int lcdif_panel_write_packed(STMP3770LCDIFState *s,
 
     valid_bytes &= byte_packing;
     lcdif_data_swizzle(s, data, &valid_bytes);
+    lcdif_data_shift(s, data);
     if (s->ctrl0 & CTRL0_WORD_LENGTH) {
         for (i = 0; i < 4; i++) {
             if (valid_bytes & (1U << i)) {
