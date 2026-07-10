@@ -942,6 +942,41 @@ async function testDigctlHclkCountContract() {
   });
 }
 
+async function testDigctlReadOnlyStatusContract() {
+  await withMachine(async (machine) => {
+    const sjtagReset = await machine.readl(DIGCTL_BASE + 0x0b0);
+    const dbgrd = await machine.readl(DIGCTL_BASE + 0x0d0);
+    const dbg = await machine.readl(DIGCTL_BASE + 0x0e0);
+    const chipId = await machine.readl(DIGCTL_BASE + 0x310);
+
+    assert.equal(sjtagReset, 0x00020000, `DIGCTL SJTAGDBG reset mismatch: got 0x${sjtagReset.toString(16)}`);
+    assert.equal(dbgrd, 0x789abcde, `DIGCTL DBGRD fixed complement mismatch: got 0x${dbgrd.toString(16)}`);
+    assert.equal(dbg, 0x87654321, `DIGCTL DBG fixed value mismatch: got 0x${dbg.toString(16)}`);
+    assert.equal(chipId, 0x37b00000, `DIGCTL CHIPID table reset mismatch: got 0x${chipId.toString(16)}`);
+
+    await machine.writel(DIGCTL_BASE + 0x0b0, 0xffffffff);
+    await machine.writel(DIGCTL_BASE + 0x0d0, 0xffffffff);
+    await machine.writel(DIGCTL_BASE + 0x0e0, 0xffffffff);
+    await machine.writel(DIGCTL_BASE + 0x310, 0xffffffff);
+
+    assert.equal(
+      await machine.readl(DIGCTL_BASE + 0x0b0),
+      0x00020003,
+      'DIGCTL SJTAGDBG must retain only diagnostic output bits 1:0',
+    );
+    assert.equal(await machine.readl(DIGCTL_BASE + 0x0d0), dbgrd, 'DIGCTL DBGRD must be read-only');
+    assert.equal(await machine.readl(DIGCTL_BASE + 0x0e0), dbg, 'DIGCTL DBG must be read-only');
+    assert.equal(await machine.readl(DIGCTL_BASE + 0x310), chipId, 'DIGCTL CHIPID must be read-only');
+
+    await machine.writel(DIGCTL_BASE + 0x0f0, 0x00000101);
+    assert.equal(
+      await machine.readl(DIGCTL_BASE + 0x0f0),
+      0x00000106,
+      'DIGCTL OCRAM_BIST_CSR must self-clear START and report a completed passing BIST',
+    );
+  });
+}
+
 async function testClkctrlResetContract() {
   await withMachine(async (machine) => {
     const pllctrl0 = await machine.readl(CLKCTRL_BASE + 0x000);
@@ -1520,6 +1555,7 @@ const tests = [
   ['DIGCTL ctrl behavior contract', testDigctlCtrlBehaviorContract],
   ['DIGCTL writeonce resets with dig reset', testDigctlWriteonceResetsWithDigReset],
   ['DIGCTL HCLK counter contract', testDigctlHclkCountContract],
+  ['DIGCTL read-only status contract', testDigctlReadOnlyStatusContract],
   ['CLKCTRL reset contract', testClkctrlResetContract],
   ['CLKCTRL gated divider contract', testClkctrlGatedDividerContract],
   ['CLKCTRL writable field masks', testClkctrlWritableFieldMasks],
