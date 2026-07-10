@@ -637,6 +637,30 @@ async function testPwmWaveformContract() {
   });
 }
 
+async function testPwmMattContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(PINCTRL_BASE + 0x140, 0);
+    await machine.writel(PWM_BASE + 0x008, 0xc0000000);
+    await machine.writel(PWM_BASE + 0x010, 0xffffffff);
+    await machine.writel(PWM_BASE + 0x020, 0x00800000);
+    await machine.writel(PWM_BASE + 0x004, 0x00000001);
+
+    const initial = (await machine.readl(PINCTRL_BASE + 0x520)) & 0x1;
+    await machine.clockStep(22);
+    assert.notEqual(
+      (await machine.readl(PINCTRL_BASE + 0x520)) & 0x1,
+      initial,
+      'PWM MATT must route the 24 MHz crystal independently of ACTIVE and PERIOD fields',
+    );
+    await machine.clockStep(22);
+    assert.equal(
+      (await machine.readl(PINCTRL_BASE + 0x520)) & 0x1,
+      initial,
+      'PWM MATT must return to the prior state after a 24 MHz clock period',
+    );
+  });
+}
+
 async function testI2cRegisterContract() {
   await withMachine(async (machine) => {
     assert.equal(
@@ -2242,6 +2266,7 @@ const tests = [
   ['TIMROT tick and update contract', testTimrotTickAndUpdateContract],
   ['PWM register contract', testPwmRegisterContract],
   ['PWM waveform contract', testPwmWaveformContract],
+  ['PWM MATT contract', testPwmMattContract],
   ['I2C register contract', testI2cRegisterContract],
   ['Application UART register contract', testAppUartRegisterContract],
   ['Debug UART register contract', testDebugUartRegisterContract],

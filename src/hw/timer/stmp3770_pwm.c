@@ -85,8 +85,7 @@ static void pwm_update_output(STMP3770PWMState *s, unsigned ch)
 
     if (pwm_channel_enabled(s, ch) && channel->latched) {
         if (channel->latched_period & PERIOD_MATT) {
-            /* MATT uses the 24 MHz crystal path, not the PWM phase logic. */
-            level = STMP3770_PINCTRL_PWM_HI_Z;
+            level = channel->counter & 1;
         } else {
             active = channel->latched_active & 0xffff;
             inactive = channel->latched_active >> 16;
@@ -108,6 +107,9 @@ static void pwm_latch_channel(STMP3770PWMState *s, unsigned ch,
 {
     STMP3770PWMChannel *channel = &s->channel[ch];
     uint32_t cdiv = (channel->pending_period >> PERIOD_CDIV_SHIFT) & 0x7;
+    uint32_t frequency = channel->pending_period & PERIOD_MATT ?
+                         PWM_CLOCK_HZ * 2 :
+                         PWM_CLOCK_HZ / pwm_dividers[cdiv];
 
     channel->latched_active = channel->pending_active;
     channel->latched_period = channel->pending_period;
@@ -118,7 +120,7 @@ static void pwm_latch_channel(STMP3770PWMState *s, unsigned ch,
     if (!in_ptimer_callback) {
         ptimer_transaction_begin(channel->ptimer);
     }
-    ptimer_set_freq(channel->ptimer, PWM_CLOCK_HZ / pwm_dividers[cdiv]);
+    ptimer_set_freq(channel->ptimer, frequency);
     ptimer_set_limit(channel->ptimer, 1, 1);
     if (!in_ptimer_callback) {
         ptimer_transaction_commit(channel->ptimer);
@@ -135,6 +137,15 @@ static void pwm_channel_tick(void *opaque)
 
     if (!pwm_channel_enabled(s, ch) || !channel->running ||
         !channel->latched) {
+        return;
+    }
+
+    if (channel->latched_period & PERIOD_MATT) {
+        channel->counter ^= 1;
+        if (channel->pending) {
+            pwm_latch_channel(s, ch, true);
+        }
+        pwm_update_output(s, ch);
         return;
     }
 
