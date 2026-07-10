@@ -93,6 +93,85 @@ static void gpmi_update_irq(STMP3770GPMIState *s)
     qemu_set_irq(s->irq, pending);
 }
 
+static void gpmi_update_fifo_status(STMP3770GPMIState *s)
+{
+    s->stat &= ~(GPMI_STAT_FIFO_EMPTY | GPMI_STAT_FIFO_FULL);
+    if (s->fifo_count == 0) {
+        s->stat |= GPMI_STAT_FIFO_EMPTY;
+    }
+    if (s->fifo_count == ARRAY_SIZE(s->data_fifo)) {
+        s->stat |= GPMI_STAT_FIFO_FULL;
+    }
+}
+
+static void gpmi_fifo_clear(STMP3770GPMIState *s)
+{
+    s->fifo_count = 0;
+    memset(s->data_fifo, 0, sizeof(s->data_fifo));
+    gpmi_update_fifo_status(s);
+}
+
+static bool gpmi_fifo_push_byte(STMP3770GPMIState *s, uint8_t value)
+{
+    if (s->fifo_count == ARRAY_SIZE(s->data_fifo)) {
+        gpmi_update_fifo_status(s);
+        return false;
+    }
+
+    s->data_fifo[s->fifo_count++] = value;
+    gpmi_update_fifo_status(s);
+    return true;
+}
+
+static bool gpmi_fifo_pop_byte(STMP3770GPMIState *s, uint8_t *value)
+{
+    if (s->fifo_count == 0) {
+        gpmi_update_fifo_status(s);
+        return false;
+    }
+
+    *value = s->data_fifo[0];
+    memmove(&s->data_fifo[0], &s->data_fifo[1],
+            (s->fifo_count - 1) * sizeof(s->data_fifo[0]));
+    s->fifo_count--;
+    gpmi_update_fifo_status(s);
+    return true;
+}
+
+static bool gpmi_data_access_is_valid(STMP3770GPMIState *s, unsigned size)
+{
+    if (s->ctrl0 & GPMI_CTRL0_WORD_LENGTH) {
+        return size >= 1 && size <= 4;
+    }
+
+    return size == 2;
+}
+
+static uint32_t gpmi_data_read(STMP3770GPMIState *s, unsigned size)
+{
+    uint32_t value = 0;
+    unsigned i;
+
+    for (i = 0; i < size; i++) {
+        uint8_t byte = 0xFF;
+
+        gpmi_fifo_pop_byte(s, &byte);
+        value |= (uint32_t)byte << (i * 8);
+    }
+
+    return value;
+}
+
+static void gpmi_data_write(STMP3770GPMIState *s, uint32_t value,
+                            unsigned size)
+{
+    unsigned i;
+
+    for (i = 0; i < size; i++) {
+        gpmi_fifo_push_byte(s, value >> (i * 8));
+    }
+}
+
 static void gpmi_write_ctrl1(STMP3770GPMIState *s, uint32_t value, int sct)
 {
     switch (sct) {
@@ -724,25 +803,36 @@ static void gpmi_execute_command(STMP3770GPMIState *s)
              * empty here and the bytes are routed through gpmi_handle_write_byte()
              * as they arrive.  Only process PIO-supplied bytes immediately. */
             if (s->fifo_count > 0) {
+                uint8_t byte;
+
+                gpmi_fifo_pop_byte(s, &byte);
                 if (s->nand_state == NAND_STATE_CMD &&
                     (s->nand_cmd == NAND_CMD_READ_1ST ||
                      s->nand_cmd == NAND_CMD_PROGRAM_1ST ||
                      s->nand_cmd == NAND_CMD_ERASE_1ST)) {
                     /* Second cycle command */
-                    gpmi_nand_second_command(s, s->fifo[0] & 0xFF);
+                    gpmi_nand_second_command(s, byte);
                 } else {
-                    gpmi_nand_command(s, s->fifo[0] & 0xFF);
+                    gpmi_nand_command(s, byte);
                 }
             }
         } else if (address == GPMI_ADDRESS_ALE) {
             if (s->fifo_count > 0) {
-                gpmi_nand_address(s, s->fifo[0] & 0xFF);
+                uint8_t byte;
+
+                gpmi_fifo_pop_byte(s, &byte);
+                gpmi_nand_address(s, byte);
             }
         } else if (address == GPMI_ADDRESS_DATA) {
             /* PIO data write - used mainly for programming */
             uint32_t i;
-            for (i = 0; i < count && i < s->fifo_count; i++) {
-                gpmi_nand_write_data_byte(s, s->fifo[i] & 0xFF);
+            for (i = 0; i < count; i++) {
+                uint8_t byte;
+
+                if (!gpmi_fifo_pop_byte(s, &byte)) {
+                    break;
+                }
+                gpmi_nand_write_data_byte(s, byte);
             }
         }
         break;
@@ -754,12 +844,13 @@ static void gpmi_execute_command(STMP3770GPMIState *s)
                  * into guest memory. */
                 gpmi_nand_load_page(s);
                 gpmi_bch_complete_read(s);
-            } else if (count <= ARRAY_SIZE(s->fifo)) {
+            } else if (count <= ARRAY_SIZE(s->data_fifo)) {
                 /* Small PIO read: fill the FIFO so software can pop bytes. */
                 uint32_t i;
-                s->fifo_count = count;
+
+                gpmi_fifo_clear(s);
                 for (i = 0; i < count; i++) {
-                    s->fifo[i] = gpmi_nand_read_data_byte(s);
+                    gpmi_fifo_push_byte(s, gpmi_nand_read_data_byte(s));
                 }
             } else {
                 /* Large DMA read: leave data in the page buffer; the DMA
@@ -797,6 +888,16 @@ static uint64_t gpmi_read(void *opaque, hwaddr offset, unsigned size)
 {
     STMP3770GPMIState *s = STMP3770_GPMI(opaque);
 
+    if (offset == GPMI_DATA) {
+        if (!gpmi_data_access_is_valid(s, size)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "stmp3770-gpmi: unsupported DATA read size %u\n",
+                          size);
+            return 0;
+        }
+        return gpmi_data_read(s, size);
+    }
+
     if (size != 4) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "stmp3770-gpmi: unsupported read size %u at offset "
@@ -825,16 +926,6 @@ static uint64_t gpmi_read(void *opaque, hwaddr offset, unsigned size)
         return s->timing1;
     case GPMI_TIMING2:
         return s->timing2;
-    case GPMI_DATA:
-        /* Pop one word from FIFO */
-        if (s->fifo_count > 0) {
-            uint32_t val = s->fifo[0];
-            memmove(&s->fifo[0], &s->fifo[1],
-                    (s->fifo_count - 1) * sizeof(s->fifo[0]));
-            s->fifo_count--;
-            return val;
-        }
-        return 0xFFFFFFFF;
     case GPMI_STAT:
         return s->stat;
     case GPMI_DEBUG:
@@ -857,6 +948,10 @@ static void gpmi_write(void *opaque, hwaddr offset,
     hwaddr base = offset & ~0xC;
 
     if (size != 4) {
+        if (offset == GPMI_DATA && gpmi_data_access_is_valid(s, size)) {
+            gpmi_data_write(s, value, size);
+            return;
+        }
         qemu_log_mask(LOG_GUEST_ERROR,
                       "stmp3770-gpmi: unsupported write size %u at offset "
                       HWADDR_FMT_plx "\n", size, offset);
@@ -917,9 +1012,8 @@ static void gpmi_write(void *opaque, hwaddr offset,
         }
         break;
     case GPMI_DATA:
-        /* Push one word to FIFO */
-        if (s->fifo_count < ARRAY_SIZE(s->fifo)) {
-            s->fifo[s->fifo_count++] = (uint32_t)value;
+        if (offset == GPMI_DATA && gpmi_data_access_is_valid(s, size)) {
+            gpmi_data_write(s, value, size);
         }
         break;
     default:
@@ -970,7 +1064,7 @@ static void gpmi_reset(DeviceState *dev)
     s->timing2 = 0x09020101;
     s->stat = GPMI_STAT_PRESENT | GPMI_STAT_FIFO_EMPTY;
     s->debug = 0;
-    s->fifo_count = 0;
+    gpmi_fifo_clear(s);
 
     gpmi_nand_reset_state(s);
     gpmi_update_rdy_timeout(s);
@@ -1124,7 +1218,7 @@ static int stmp3770_gpmi_dma_handler(STMP3770DMAState *dma,
         const int max_pio = ARRAY_SIZE(pio_offsets);
 
         /* Each descriptor's PIO data is independent; clear stale FIFO bytes. */
-        s->fifo_count = 0;
+        gpmi_fifo_clear(s);
         s->write_cmd_sent = false;
 
         if (nwords > 0) {
@@ -1156,10 +1250,7 @@ static int stmp3770_gpmi_dma_handler(STMP3770DMAState *dma,
         size_t n;
         for (n = 0; n < len; n++) {
             if (s->fifo_count > 0) {
-                dst[n] = s->fifo[0] & 0xFF;
-                memmove(&s->fifo[0], &s->fifo[1],
-                        (s->fifo_count - 1) * sizeof(s->fifo[0]));
-                s->fifo_count--;
+                gpmi_fifo_pop_byte(s, &dst[n]);
             } else if (s->data_ptr < s->data_count) {
                 dst[n] = gpmi_nand_read_data_byte(s);
             } else {
@@ -1217,10 +1308,37 @@ void stmp3770_gpmi_set_bch(STMP3770GPMIState *s, STMP3770BCHState *bch)
     s->bch = bch;
 }
 
+static int gpmi_post_load(void *opaque, int version_id)
+{
+    STMP3770GPMIState *s = STMP3770_GPMI(opaque);
+    unsigned int i;
+
+    if (version_id < 3) {
+        unsigned int old_count = MIN(s->fifo_count, ARRAY_SIZE(s->fifo));
+
+        /*
+         * Earlier streams stored PIO bytes in uint32_t slots, but every
+         * consumer used only the low byte of each slot.  Preserve that
+         * published stream behavior rather than manufacturing three bytes
+         * per legacy entry.
+         */
+        memset(s->data_fifo, 0, sizeof(s->data_fifo));
+        for (i = 0; i < old_count; i++) {
+            s->data_fifo[i] = s->fifo[i];
+        }
+        s->fifo_count = old_count;
+    }
+    s->fifo_count = MIN(s->fifo_count, ARRAY_SIZE(s->data_fifo));
+    gpmi_update_fifo_status(s);
+    gpmi_update_irq(s);
+    return 0;
+}
+
 static const VMStateDescription vmstate_gpmi = {
     .name = "stmp3770-gpmi",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
+    .post_load = gpmi_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(ctrl0, STMP3770GPMIState),
         VMSTATE_UINT32(compare, STMP3770GPMIState),
@@ -1236,6 +1354,7 @@ static const VMStateDescription vmstate_gpmi = {
         VMSTATE_UINT32(debug, STMP3770GPMIState),
         VMSTATE_UINT32(fifo_count, STMP3770GPMIState),
         VMSTATE_UINT32_ARRAY(fifo, STMP3770GPMIState, 16),
+        VMSTATE_UINT8_ARRAY_V(data_fifo, STMP3770GPMIState, 64, 3),
         VMSTATE_BOOL(write_cmd_sent, STMP3770GPMIState),
         VMSTATE_UINT8(nand_cmd, STMP3770GPMIState),
         VMSTATE_UINT32(nand_addr, STMP3770GPMIState),

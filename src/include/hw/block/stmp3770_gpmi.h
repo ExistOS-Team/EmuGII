@@ -196,9 +196,10 @@ struct STMP3770GPMIState {
     uint32_t stat;
     uint32_t debug;
 
-    /* FIFO for PIO data transfers */
+    /* FIFO layout used by migration streams through version 2. */
     uint32_t fifo[16];
     uint32_t fifo_count;
+    uint8_t data_fifo[64];
 
     /* Tracks whether the command byte in a CLE+ADDRESS_INCREMENT write has
      * already been sent; reset at the start of each DMA transfer. */

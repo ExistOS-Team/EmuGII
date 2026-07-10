@@ -77,6 +77,7 @@ class QTestMachine {
         this.waiters.shift().reject(err);
       }
     });
+
   }
 
   #onStdout(chunk) {
@@ -183,6 +184,11 @@ class QTestMachine {
   async writel(addr, value) {
     const resp = await this.cmd(`writel 0x${addr.toString(16)} 0x${value.toString(16)}`);
     assert.equal(resp, 'OK', `Unexpected writel response: ${resp}`);
+  }
+
+  async writew(addr, value) {
+    const resp = await this.cmd(`writew 0x${addr.toString(16)} 0x${value.toString(16)}`);
+    assert.equal(resp, 'OK', `Unexpected writew response: ${resp}`);
   }
 
   async readb(addr) {
@@ -2152,6 +2158,84 @@ async function testGpmiEccRegisterContract() {
   });
 }
 
+async function testGpmiDataFifoContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(GPMI_BASE + 0x000, 0);
+    assert.equal(
+      (await machine.readl(GPMI_BASE + 0x0b0)) & 0x30,
+      0x20,
+      'GPMI STAT must report an empty, non-full FIFO after reset is released',
+    );
+
+    await machine.writew(GPMI_BASE + 0x0a0, 0x3412);
+    assert.equal(
+      (await machine.readl(GPMI_BASE + 0x0b0)) & 0x30,
+      0,
+      'GPMI STAT must clear FIFO_EMPTY after a 16-bit DATA write',
+    );
+    assert.equal(
+      await machine.readw(GPMI_BASE + 0x0a0),
+      0x3412,
+      'GPMI DATA must preserve a 16-bit transfer in 16-bit mode',
+    );
+    assert.equal(
+      (await machine.readl(GPMI_BASE + 0x0b0)) & 0x30,
+      0x20,
+      'GPMI STAT must restore FIFO_EMPTY after the last DATA byte is read',
+    );
+
+    await machine.writel(GPMI_BASE + 0x004, 1 << 23);
+    await machine.writeb(GPMI_BASE + 0x0a0, 0x5a);
+    await machine.writew(GPMI_BASE + 0x0a0, 0x3412);
+    await machine.writel(GPMI_BASE + 0x0a0, 0x88776655);
+    assert.equal(await machine.readb(GPMI_BASE + 0x0a0), 0x5a);
+    assert.equal(await machine.readw(GPMI_BASE + 0x0a0), 0x3412);
+    assert.equal(await machine.readl(GPMI_BASE + 0x0a0), 0x88776655);
+
+    await machine.writeb(GPMI_BASE + 0x0a0, 0xa1);
+    await machine.writeb(GPMI_BASE + 0x0a0, 0xb2);
+    await machine.writeb(GPMI_BASE + 0x0a0, 0xc3);
+    await machine.writel(GPMI_BASE + 0x000, (1 << 29) | (1 << 23) | 3);
+    assert.equal(
+      (await machine.readl(GPMI_BASE + 0x0b0)) & 0x30,
+      0x20,
+      'GPMI WRITE command must consume every queued DATA byte through XFER_COUNT',
+    );
+
+    await machine.writel(GPMI_BASE + 0x0a4, 0xdeadbeef);
+    assert.equal(
+      (await machine.readl(GPMI_BASE + 0x0b0)) & 0x30,
+      0x20,
+      'GPMI DATA must reject an undocumented SCT alias without altering FIFO state',
+    );
+
+    for (let byte = 0; byte < 64; byte += 1) {
+      await machine.writeb(GPMI_BASE + 0x0a0, byte);
+    }
+    assert.equal(
+      (await machine.readl(GPMI_BASE + 0x0b0)) & 0x30,
+      0x10,
+      'GPMI STAT must report a full, non-empty FIFO after 64 queued 8-bit bus cycles',
+    );
+    await machine.writeb(GPMI_BASE + 0x0a0, 0xff);
+    assert.equal(
+      await machine.readb(GPMI_BASE + 0x0a0),
+      0,
+      'GPMI DATA must leave the FIFO unchanged when it is full',
+    );
+
+    await machine.writel(GPMI_BASE + 0x000, 0);
+    for (let word = 0; word < 32; word += 1) {
+      await machine.writew(GPMI_BASE + 0x0a0, word);
+    }
+    assert.equal(
+      (await machine.readl(GPMI_BASE + 0x0b0)) & 0x30,
+      0x10,
+      'GPMI STAT must report a full FIFO after 32 queued 16-bit bus cycles',
+    );
+  });
+}
+
 async function testOnChipRomAndSramMirrorContract() {
   await withMachine(async (machine) => {
     await machine.writel(SRAM_BASE + 0x1234, 0x11223344);
@@ -3976,6 +4060,7 @@ const tests = [
   ['GPMI TIMING2 contract', testGpmiTiming2Contract],
   ['GPMI CTRL1 contract', testGpmiCtrl1Contract],
   ['GPMI ECC register contract', testGpmiEccRegisterContract],
+  ['GPMI DATA FIFO contract', testGpmiDataFifoContract],
   ['on-chip ROM and SRAM mirror contract', testOnChipRomAndSramMirrorContract],
   ['DCP register and memcopy contract', testDcpRegisterAndMemcopyContract],
   ['DCP channel register map contract', testDcpChannelRegisterMapContract],
