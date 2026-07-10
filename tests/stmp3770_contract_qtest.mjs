@@ -2151,6 +2151,40 @@ async function testIcollCoreContract() {
   });
 }
 
+async function testIcollSameLevelPriorityContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(ICOLL_BASE + 0x028, 0xc0000000);
+    await machine.writel(ICOLL_BASE + 0x160, 0x00001000);
+    await machine.writel(ICOLL_BASE + 0x060, 0x0c00000c);
+
+    assert.equal(
+      await machine.readl(ICOLL_BASE + 0x000),
+      0x0000100c,
+      'ICOLL must select the highest-numbered source when same-level requests coincide',
+    );
+    assert.equal(
+      (await machine.readl(ICOLL_BASE + 0x030)) & 0x3f,
+      3,
+      'ICOLL STAT must report the highest-numbered same-level source',
+    );
+  });
+}
+
+async function testIcollBypassSameLevelPriorityContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(ICOLL_BASE + 0x028, 0xc0000000);
+    await machine.writel(ICOLL_BASE + 0x024, 0x00100000);
+    await machine.writel(ICOLL_BASE + 0x160, 0x00001000);
+    await machine.writel(ICOLL_BASE + 0x060, 0x0c00000c);
+
+    assert.equal(
+      await machine.readl(ICOLL_BASE + 0x000),
+      0x0000100c,
+      'ICOLL BYPASS_FSM must use the highest-numbered coincident request',
+    );
+  });
+}
+
 async function testIcollVectorAcknowledgeContract() {
   await withMachine(async (machine) => {
     await machine.writel(ICOLL_BASE + 0x028, 0xc0000000);
@@ -3439,6 +3473,8 @@ const tests = [
   ['LCDIF data access contract', testLcdifDataAccessContract],
   ['PINCTRL Bank 3 absence', testPinctrlBank3Absent],
   ['ICOLL core contract', testIcollCoreContract],
+  ['ICOLL same-level priority contract', testIcollSameLevelPriorityContract],
+  ['ICOLL BYPASS same-level priority contract', testIcollBypassSameLevelPriorityContract],
   ['ICOLL vector acknowledge contract', testIcollVectorAcknowledgeContract],
   ['ICOLL ARM_RSE mode contract', testIcollArmRseModeContract],
   ['ICOLL no nesting contract', testIcollNoNestingContract],

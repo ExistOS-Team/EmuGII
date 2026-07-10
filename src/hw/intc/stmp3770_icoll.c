@@ -333,7 +333,7 @@ static void stmp3770_icoll_update(STMP3770ICOLLState *s)
     if (s->ctrl & CTRL_BYPASS_FSM) {
         s->request_holding = requests;
         s->vector_pending = false;
-        for (i = 0; i < 64; i++) {
+        for (i = 63; i >= 0; i--) {
             if ((requests & (1ULL << i)) &&
                 !stmp3770_icoll_source_routes_to_fiq(s, i)) {
                 s->vector = i;
@@ -383,7 +383,8 @@ static void stmp3770_icoll_update(STMP3770ICOLLState *s)
         }
 
         /* Higher level wins; source number resolves ties within one level. */
-        if (!has_candidate || level > selected_level) {
+        if (!has_candidate || level > selected_level ||
+            (level == selected_level && i > selected_vector)) {
             selected_vector = i;
             selected_level = level;
         }
