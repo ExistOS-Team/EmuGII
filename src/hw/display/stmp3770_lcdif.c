@@ -1450,8 +1450,14 @@ static void lcdif_write(void *opaque, hwaddr offset,
     }
 
     if (base == REG_CTRL0) {
+        uint32_t old_ctrl0 = s->ctrl0;
+
         lcdif_apply_sct(&s->ctrl0, (uint32_t)value & CTRL0_WRITABLE_MASK,
                         sct);
+        if (old_ctrl0 & CTRL0_RUN) {
+            s->ctrl0 = (s->ctrl0 & ~CTRL0_DATA_SELECT) |
+                       (old_ctrl0 & CTRL0_DATA_SELECT);
+        }
         /*
          * Hardware ties CLKGATE to SFTRST: asserting reset automatically
          * gates the clock, so firmware polls CLKGATE after setting SFTRST.
@@ -1463,8 +1469,13 @@ static void lcdif_write(void *opaque, hwaddr offset,
     }
 
     if (base == REG_CTRL1) {
+        uint32_t old_ctrl1 = s->ctrl1;
+
         lcdif_apply_sct(&s->ctrl1, (uint32_t)value & CTRL1_WRITABLE_MASK,
                         sct);
+        if (s->ctrl0 & CTRL0_RUN) {
+            s->ctrl1 = (s->ctrl1 & ~2U) | (old_ctrl1 & 2U);
+        }
         if (sct == 0) {
             s->irq = lcdif_ctrl1_status_to_irq(s->ctrl1);
         } else if (sct == 1) {
