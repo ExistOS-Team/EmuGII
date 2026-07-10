@@ -1242,6 +1242,34 @@ async function testLcdifSoftResetContract() {
   });
 }
 
+async function testLcdifBytePackingContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(LCDIF_BASE + 0x008, 0xc0000000);
+    await machine.writel(LCDIF_BASE + 0x000, 0x00020000);
+    await machine.writeb(LCDIF_BASE + 0x0b0, 0x2c);
+    await machine.writel(LCDIF_BASE + 0x010, 0x00070000);
+    await machine.writel(LCDIF_BASE + 0x000, 0x00070003);
+    await machine.writel(LCDIF_BASE + 0x0b0, 0xaabbccdd);
+
+    assert.equal(
+      (await machine.readl(LCDIF_BASE + 0x000)) & 0x00010000,
+      0,
+      'LCDIF must consume only the three valid BYTE_PACKING_FORMAT subwords',
+    );
+
+    await machine.writel(LCDIF_BASE + 0x000, 0x20020000);
+    await machine.writeb(LCDIF_BASE + 0x0b0, 0x2e);
+    assert.equal(await machine.readb(LCDIF_BASE + 0x0b0), 0xdd);
+    assert.equal(await machine.readb(LCDIF_BASE + 0x0b0), 0xcc);
+    assert.equal(await machine.readb(LCDIF_BASE + 0x0b0), 0xbb);
+    assert.equal(
+      await machine.readb(LCDIF_BASE + 0x0b0),
+      0,
+      'LCDIF must not transmit the byte masked by BYTE_PACKING_FORMAT',
+    );
+  });
+}
+
 async function testLcdifDataAccessContract() {
   await withMachine(async (machine) => {
     const ctrl = 0x00030001;
@@ -2600,6 +2628,7 @@ const tests = [
   ['LCDIF register map contract', testLcdifRegisterMapContract],
   ['LCDIF clock gate contract', testLcdifClockGateContract],
   ['LCDIF soft reset contract', testLcdifSoftResetContract],
+  ['LCDIF byte packing contract', testLcdifBytePackingContract],
   ['LCDIF data access contract', testLcdifDataAccessContract],
   ['PINCTRL Bank 3 absence', testPinctrlBank3Absent],
   ['ICOLL core contract', testIcollCoreContract],

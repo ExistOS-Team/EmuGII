@@ -1200,16 +1200,90 @@ static void lcdif_soft_reset(STMP3770LCDIFState *s)
     lcdif_update_irq(s);
 }
 
-static void lcdif_consume_data_words(STMP3770LCDIFState *s, size_t bytes)
+static unsigned int lcdif_data_words(STMP3770LCDIFState *s,
+                                     uint8_t valid_bytes)
 {
-    unsigned int words;
+    unsigned int words = 0;
+    uint8_t byte_packing = (s->ctrl1 >> 16) & 0xf;
+
+    valid_bytes &= byte_packing;
+    if (s->ctrl0 & CTRL0_WORD_LENGTH) {
+        while (valid_bytes) {
+            words += valid_bytes & 1;
+            valid_bytes >>= 1;
+        }
+        return words;
+    }
+
+    if ((valid_bytes & 0x3) == 0x3) {
+        words++;
+    }
+    if ((valid_bytes & 0xc) == 0xc) {
+        words++;
+    }
+    return words;
+}
+
+static unsigned int lcdif_panel_write_packed(STMP3770LCDIFState *s,
+                                             const uint8_t data[4],
+                                             uint8_t valid_bytes,
+                                             bool data_select)
+{
+    uint8_t packed[4];
+    uint8_t byte_packing = (s->ctrl1 >> 16) & 0xf;
+    unsigned int i;
+    unsigned int packed_len = 0;
+
+    valid_bytes &= byte_packing;
+    if (s->ctrl0 & CTRL0_WORD_LENGTH) {
+        for (i = 0; i < 4; i++) {
+            if (valid_bytes & (1U << i)) {
+                packed[packed_len++] = data[i];
+            }
+        }
+    } else {
+        for (i = 0; i < 4; i += 2) {
+            if ((valid_bytes & (3U << i)) == (3U << i)) {
+                packed[packed_len++] = data[i];
+                packed[packed_len++] = data[i + 1];
+            }
+        }
+    }
+
+    lcdif_panel_write(s, packed, packed_len, data_select);
+    return lcdif_data_words(s, valid_bytes);
+}
+
+static unsigned int lcdif_panel_write_buffer(STMP3770LCDIFState *s,
+                                              const uint8_t *buf, size_t len,
+                                              bool data_select)
+{
+    unsigned int words = 0;
+
+    while (len) {
+        uint8_t data[4] = { 0 };
+        size_t chunk = MIN(len, sizeof(data));
+        uint8_t valid_bytes = (1U << chunk) - 1;
+
+        memcpy(data, buf, chunk);
+        words += lcdif_panel_write_packed(s, data, valid_bytes, data_select);
+        buf += chunk;
+        len -= chunk;
+    }
+
+    return words;
+}
+
+static void lcdif_consume_data_words(STMP3770LCDIFState *s,
+                                     unsigned int words)
+{
     uint32_t count;
 
-    if (!(s->ctrl0 & CTRL0_RUN) || (s->ctrl0 & CTRL0_BYPASS_COUNT)) {
+    if (!words || !(s->ctrl0 & CTRL0_RUN) ||
+        (s->ctrl0 & CTRL0_BYPASS_COUNT)) {
         return;
     }
 
-    words = (s->ctrl0 & CTRL0_WORD_LENGTH) ? bytes : DIV_ROUND_UP(bytes, 2);
     count = s->ctrl0 & CTRL0_COUNT_MASK;
     if (words >= count) {
         s->ctrl0 &= ~(CTRL0_RUN | CTRL0_COUNT_MASK);
@@ -1265,7 +1339,8 @@ static uint64_t lcdif_read(void *opaque, hwaddr offset, unsigned size)
         unsigned int i;
 
         lcdif_panel_read(s, data, size);
-        lcdif_consume_data_words(s, size);
+        lcdif_consume_data_words(s, (s->ctrl0 & CTRL0_WORD_LENGTH) ?
+                                 size : DIV_ROUND_UP(size, 2));
         for (i = 0; i < size; i++) {
             value |= (uint32_t)data[i] << (i * 8);
         }
@@ -1376,15 +1451,17 @@ static void lcdif_write(void *opaque, hwaddr offset,
         break;
     case REG_DATA:
     {
-        uint8_t data[4];
+        uint8_t data[4] = { 0 };
         bool data_select = (s->ctrl0 & CTRL0_DATA_SELECT) != 0;
         unsigned int i;
 
         for (i = 0; i < size; i++) {
             data[i] = value >> (i * 8);
         }
-        lcdif_panel_write(s, data, size, data_select);
-        lcdif_consume_data_words(s, size);
+        lcdif_consume_data_words(s,
+                                 lcdif_panel_write_packed(s, data,
+                                                          (1U << size) - 1,
+                                                          data_select));
         break;
     }
     case REG_STAT:
@@ -1421,14 +1498,16 @@ static int stmp3770_lcdif_dma_handler(STMP3770DMAState *dma,
     data_select = (s->dma_pio_ctrl & CTRL0_DATA_SELECT) != 0;
 
     if (event == STMP3770_DMA_EVENT_DATA_WRITE) {
-        lcdif_panel_write(s, buf, len, data_select);
-        lcdif_consume_data_words(s, len);
+        lcdif_consume_data_words(s,
+                                 lcdif_panel_write_buffer(s, buf, len,
+                                                          data_select));
         return len;
     }
 
     if (event == STMP3770_DMA_EVENT_DATA_READ) {
         lcdif_panel_read(s, buf, len);
-        lcdif_consume_data_words(s, len);
+        lcdif_consume_data_words(s, (s->ctrl0 & CTRL0_WORD_LENGTH) ?
+                                 len : DIV_ROUND_UP(len, 2));
         return len;
     }
 
