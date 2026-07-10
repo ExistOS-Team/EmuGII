@@ -19,8 +19,6 @@
 #include "qemu/module.h"
 #include "hw/usb/stmp3770_usb.h"
 
-#define USB_VERSION         0x01000000
-
 /* Register offsets */
 #define REG_ID              0x000
 #define REG_HWGENERAL       0x004
@@ -35,6 +33,8 @@
 #define REG_SBUSCFG         0x090
 #define REG_CAPLENGTH       0x100
 #define REG_HCIVERSION      0x102
+#define REG_HCSPARAMS       0x104
+#define REG_HCCPARAMS       0x108
 #define REG_DCIVERSION      0x120
 #define REG_DCCPARAMS       0x124
 #define REG_USBCMD          0x140
@@ -78,8 +78,15 @@
 
 #define USBMODE_DEVICE      0x2
 
-#define DCCPARAMS_DC        (1U << 7)
-#define DCCPARAMS_DEN_MASK  0x1F
+#define USBCTRL_ID_RESET            0x0042FA05
+#define USBCTRL_ARC_GENERAL_RESET   0x00000015
+#define USBCTRL_HWHOST_RESET        0x10020001
+#define USBCTRL_HWDEVICE_RESET      0x0000000B
+#define USBCTRL_HWTXBUF_RESET       0x00050810
+#define USBCTRL_HWRXBUF_RESET       0x00000610
+#define USBCTRL_HCSPARAMS_RESET     0x00010011
+#define USBCTRL_HCCPARAMS_RESET     0x00000006
+#define USBCTRL_DCCPARAMS_RESET     0x00000185
 
 #define PORTSC1_PTS         (1U << 30)
 #define PORTSC1_PP          (1U << 12)
@@ -106,6 +113,30 @@ static uint64_t usb_read(void *opaque, hwaddr offset, unsigned size)
 {
     STMP3770USBState *s = opaque;
 
+    switch (offset) {
+    case REG_CAPLENGTH:
+        if (size == 1) {
+            return 0x40;
+        }
+        break;
+    case REG_HCIVERSION:
+        if (size == 2) {
+            return 0x0100;
+        }
+        break;
+    case REG_DCIVERSION:
+        if (size == 2) {
+            return 0x0001;
+        }
+        break;
+    default:
+        if (size == 4) {
+            break;
+        }
+        /* Fall through to the common invalid-access report below. */
+        break;
+    }
+
     if (size != 4) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "stmp3770-usb: unsupported read size %u at offset "
@@ -115,17 +146,17 @@ static uint64_t usb_read(void *opaque, hwaddr offset, unsigned size)
 
     switch (offset) {
     case REG_ID:
-        return 0x01000000;  /* generic ARC USB OTG */
+        return USBCTRL_ID_RESET;
     case REG_HWGENERAL:
-        return 0x00000783;
+        return USBCTRL_ARC_GENERAL_RESET;
     case REG_HWHOST:
-        return 0x10020001;
+        return USBCTRL_HWHOST_RESET;
     case REG_HWDEVICE:
-        return 0x00000009;  /* 8 endpoints */
+        return USBCTRL_HWDEVICE_RESET;
     case REG_HWTXBUF:
-        return 0x80040404;
+        return USBCTRL_HWTXBUF_RESET;
     case REG_HWRXBUF:
-        return 0x00000404;
+        return USBCTRL_HWRXBUF_RESET;
     case REG_GPTIMER0LD:
     case REG_GPTIMER1LD:
         return 0;
@@ -134,14 +165,12 @@ static uint64_t usb_read(void *opaque, hwaddr offset, unsigned size)
         return s->gptimer[(offset - REG_GPTIMER0CTRL) / 8];
     case REG_SBUSCFG:
         return 0;
-    case REG_CAPLENGTH:
-        return 0x00000040;
-    case REG_HCIVERSION:
-        return 0x00000000;
-    case REG_DCIVERSION:
-        return 0x00000001;
+    case REG_HCSPARAMS:
+        return USBCTRL_HCSPARAMS_RESET;
+    case REG_HCCPARAMS:
+        return USBCTRL_HCCPARAMS_RESET;
     case REG_DCCPARAMS:
-        return DCCPARAMS_DC | 8;  /* device capable, 8 endpoints */
+        return USBCTRL_DCCPARAMS_RESET;
     case REG_USBCMD:
         return s->usbcmd;
     case REG_USBSTS:

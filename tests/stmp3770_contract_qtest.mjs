@@ -25,6 +25,7 @@ const RTC_BASE = 0x8005c000;
 const PWM_BASE = 0x80064000;
 const TIMROT_BASE = 0x80068000;
 const USBPHY_BASE = 0x8007c000;
+const USB_BASE = 0x80080000;
 const LRADC_BASE = 0x80050000;
 const I2C_BASE = 0x80058000;
 const APPUART_BASE = 0x8006c000;
@@ -163,6 +164,12 @@ class QTestMachine {
   async readl(addr) {
     const resp = await this.cmd(`readl 0x${addr.toString(16)}`);
     assert.match(resp, /^OK 0x[0-9a-fA-F]+$/, `Unexpected readl response: ${resp}`);
+    return Number(BigInt(resp.split(' ')[1]));
+  }
+
+  async readw(addr) {
+    const resp = await this.cmd(`readw 0x${addr.toString(16)}`);
+    assert.match(resp, /^OK 0x[0-9a-fA-F]+$/, `Unexpected readw response: ${resp}`);
     return Number(BigInt(resp.split(' ')[1]));
   }
 
@@ -1440,6 +1447,46 @@ async function testUsbPhyRegisterContract() {
       await machine.readl(USBPHY_BASE + 0x050),
       0,
       'USBPHY SFTRST must not reset DEBUG outside its documented reset domain',
+    );
+  });
+}
+
+async function testUsbCapabilityRegisterContract() {
+  await withMachine(async (machine) => {
+    const fixedRegisters = [
+      [0x000, 0x0042fa05, 'ID'],
+      [0x004, 0x00000015, 'ARC_GENERAL'],
+      [0x008, 0x10020001, 'HWHOST'],
+      [0x00c, 0x0000000b, 'HWDEVICE'],
+      [0x010, 0x00050810, 'HWTXBUF'],
+      [0x014, 0x00000610, 'HWRXBUF'],
+      [0x104, 0x00010011, 'HCSPARAMS'],
+      [0x108, 0x00000006, 'HCCPARAMS'],
+      [0x124, 0x00000185, 'DCCPARAMS'],
+    ];
+
+    for (const [offset, expected, name] of fixedRegisters) {
+      assert.equal(
+        await machine.readl(USB_BASE + offset),
+        expected,
+        `USBCTRL ${name} must decode to its PDF reset value`,
+      );
+    }
+
+    assert.equal(
+      await machine.readb(USB_BASE + 0x100),
+      0x40,
+      'USBCTRL CAPLENGTH must accept its documented 8-bit access',
+    );
+    assert.equal(
+      await machine.readw(USB_BASE + 0x102),
+      0x0100,
+      'USBCTRL HCIVERSION must accept its documented 16-bit access',
+    );
+    assert.equal(
+      await machine.readw(USB_BASE + 0x120),
+      0x0001,
+      'USBCTRL DCIVERSION must accept its documented 16-bit access',
     );
   });
 }
@@ -2810,6 +2857,7 @@ const tests = [
   ['LCDIF streaming end contract', testLcdifStreamingEndContract],
   ['LCDIF first read dummy contract', testLcdifFirstReadDummyContract],
   ['USBPHY register contract', testUsbPhyRegisterContract],
+  ['USBCTRL capability register contract', testUsbCapabilityRegisterContract],
   ['LCDIF data access contract', testLcdifDataAccessContract],
   ['PINCTRL Bank 3 absence', testPinctrlBank3Absent],
   ['ICOLL core contract', testIcollCoreContract],
