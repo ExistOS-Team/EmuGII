@@ -307,6 +307,27 @@ async function testRtcClockGateContract() {
   });
 }
 
+async function testRtcWatchdogDebugContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(RTC_BASE + 0x008, 0xc0000000);
+    await machine.writel(RTC_BASE + 0x0c4, 0x00000003);
+    assert.equal(
+      await machine.readl(RTC_BASE + 0x0c0),
+      0x00000002,
+      'RTC DEBUG must allow only WATCHDOG_RESET_MASK to be written',
+    );
+
+    await machine.writel(RTC_BASE + 0x050, 1);
+    await machine.writel(RTC_BASE + 0x004, 0x00000010);
+    await machine.clockStep(1_000_000);
+    assert.equal(
+      await machine.readl(RTC_BASE + 0x0c0),
+      0x00000003,
+      'RTC watchdog mask must retain the SoC and expose asserted watchdog reset state',
+    );
+  });
+}
+
 async function testTimrotTickAndUpdateContract() {
   await withMachine(async (machine) => {
     await machine.writel(TIMROT_BASE + 0x008, 0xc0000000);
@@ -1741,6 +1762,7 @@ const tests = [
   ['RTC reset and persistent0 contract', testRtcResetAndPersistent0Contract],
   ['RTC copy controller contract', testRtcCopyControllerContract],
   ['RTC clock gate contract', testRtcClockGateContract],
+  ['RTC watchdog debug contract', testRtcWatchdogDebugContract],
   ['TIMROT tick and update contract', testTimrotTickAndUpdateContract],
   ['PWM register contract', testPwmRegisterContract],
   ['LCDIF CTRL1 interrupt layout', testLcdifCtrl1Layout],

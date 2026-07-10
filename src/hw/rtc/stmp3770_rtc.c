@@ -66,6 +66,9 @@
                                      CTRL_ONEMSEC_IRQ | CTRL_ALARM_IRQ | \
                                      CTRL_ONEMSEC_IRQ_EN | CTRL_ALARM_IRQ_EN)
 
+#define DEBUG_WATCHDOG_RESET        (1U << 0)
+#define DEBUG_WATCHDOG_RESET_MASK   (1U << 1)
+
 /* STAT bits */
 #define STAT_RTC_PRESENT            (1U << 31)
 #define STAT_ALARM_PRESENT          (1U << 30)
@@ -225,7 +228,10 @@ static void stmp3770_rtc_tick(void *opaque)
     if ((s->ctrl & CTRL_WATCHDOGEN) && s->watchdog != 0) {
         s->watchdog--;
         if (s->watchdog == 0) {
-            qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+            s->debug |= DEBUG_WATCHDOG_RESET;
+            if (!(s->debug & DEBUG_WATCHDOG_RESET_MASK)) {
+                qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+            }
         }
     }
 }
@@ -399,7 +405,8 @@ static void stmp3770_rtc_write(void *opaque, hwaddr offset,
         return;
 
     case REG_DEBUG:
-        stmp3770_rtc_apply_write(&s->debug, 0x3, (uint32_t)value,
+        stmp3770_rtc_apply_write(&s->debug, DEBUG_WATCHDOG_RESET_MASK,
+                                (uint32_t)value,
                                 sct, offset, size);
         return;
 
