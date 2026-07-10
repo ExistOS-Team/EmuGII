@@ -81,6 +81,7 @@ struct STMP3770LCDIFState {
     uint16_t panel_y_end;
     uint16_t panel_x;
     uint16_t panel_y;
+    bool first_read_dummy_pending;
     uint8_t panel_vram[STMP3770_LCDIF_PANEL_SIZE];
     bool panel_dirty;
 

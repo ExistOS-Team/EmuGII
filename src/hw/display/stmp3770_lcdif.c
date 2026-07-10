@@ -1371,6 +1371,18 @@ static void lcdif_consume_data_words(STMP3770LCDIFState *s,
     }
 }
 
+static void lcdif_panel_read_for_fifo(STMP3770LCDIFState *s, uint8_t *buf,
+                                      size_t len)
+{
+    if (s->first_read_dummy_pending) {
+        uint8_t dummy;
+
+        lcdif_panel_read(s, &dummy, sizeof(dummy));
+        s->first_read_dummy_pending = false;
+    }
+    lcdif_panel_read(s, buf, len);
+}
+
 static uint64_t lcdif_read(void *opaque, hwaddr offset, unsigned size)
 {
     STMP3770LCDIFState *s = opaque;
@@ -1417,7 +1429,7 @@ static uint64_t lcdif_read(void *opaque, hwaddr offset, unsigned size)
         uint32_t value = 0;
         unsigned int i;
 
-        lcdif_panel_read(s, data, size);
+        lcdif_panel_read_for_fifo(s, data, size);
         lcdif_consume_data_words(s, (s->ctrl0 & CTRL0_WORD_LENGTH) ?
                                  size : DIV_ROUND_UP(size, 2));
         for (i = 0; i < size; i++) {
@@ -1469,6 +1481,10 @@ static void lcdif_write(void *opaque, hwaddr offset,
         if (old_ctrl0 & CTRL0_RUN) {
             s->ctrl0 = (s->ctrl0 & ~CTRL0_DATA_SELECT) |
                        (old_ctrl0 & CTRL0_DATA_SELECT);
+        }
+        if (!(old_ctrl0 & CTRL0_RUN) && (s->ctrl0 & CTRL0_RUN) &&
+            (s->ctrl0 & CTRL0_READ_WRITEB) && (s->ctrl1 & (1U << 4))) {
+            s->first_read_dummy_pending = true;
         }
         if ((old_ctrl0 & (CTRL0_RUN | CTRL0_BYPASS_COUNT)) ==
             (CTRL0_RUN | CTRL0_BYPASS_COUNT) &&
@@ -1603,7 +1619,7 @@ static int stmp3770_lcdif_dma_handler(STMP3770DMAState *dma,
     }
 
     if (event == STMP3770_DMA_EVENT_DATA_READ) {
-        lcdif_panel_read(s, buf, len);
+        lcdif_panel_read_for_fifo(s, buf, len);
         lcdif_consume_data_words(s, (s->ctrl0 & CTRL0_WORD_LENGTH) ?
                                  len : DIV_ROUND_UP(len, 2));
         return len;
@@ -1676,6 +1692,7 @@ static void lcdif_reset(DeviceState *dev)
     s->panel_cmd = 0;
     s->panel_param_cmd = 0;
     s->panel_param_len = 0;
+    s->first_read_dummy_pending = false;
     memset(s->panel_param, 0, sizeof(s->panel_param));
     memset(s->panel_vram, 0, sizeof(s->panel_vram));
     memset(s->frontpanel_key_state, 0, sizeof(s->frontpanel_key_state));
@@ -1730,7 +1747,7 @@ static void lcdif_realize(DeviceState *dev, Error **errp)
 
 static const VMStateDescription vmstate_lcdif = {
     .name = "stmp3770-lcdif",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(ctrl0, STMP3770LCDIFState),
@@ -1758,6 +1775,7 @@ static const VMStateDescription vmstate_lcdif = {
         VMSTATE_UINT16(panel_y_end, STMP3770LCDIFState),
         VMSTATE_UINT16(panel_x, STMP3770LCDIFState),
         VMSTATE_UINT16(panel_y, STMP3770LCDIFState),
+        VMSTATE_BOOL_V(first_read_dummy_pending, STMP3770LCDIFState, 3),
         VMSTATE_UINT8_ARRAY(panel_vram, STMP3770LCDIFState,
                             STMP3770_LCDIF_PANEL_SIZE),
         VMSTATE_BOOL(panel_dirty, STMP3770LCDIFState),

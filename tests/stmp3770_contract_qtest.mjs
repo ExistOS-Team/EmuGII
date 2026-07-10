@@ -1346,6 +1346,26 @@ async function testLcdifStreamingEndContract() {
   });
 }
 
+async function testLcdifFirstReadDummyContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(LCDIF_BASE + 0x008, 0xc0000000);
+    await machine.writel(LCDIF_BASE + 0x000, 0x00020000);
+    await machine.writeb(LCDIF_BASE + 0x0b0, 0x2c);
+    await machine.writel(LCDIF_BASE + 0x000, 0x00070004);
+    await machine.writel(LCDIF_BASE + 0x0b0, 0x44332211);
+
+    await machine.writel(LCDIF_BASE + 0x000, 0x00020000);
+    await machine.writeb(LCDIF_BASE + 0x0b0, 0x2e);
+    await machine.writel(LCDIF_BASE + 0x010, 0x000f0010);
+    await machine.writel(LCDIF_BASE + 0x000, 0x20030003);
+    assert.equal(
+      await machine.readb(LCDIF_BASE + 0x0b0),
+      0x22,
+      'LCDIF FIRST_READ_DUMMY must discard the initial panel response before filling the read FIFO',
+    );
+  });
+}
+
 async function testLcdifDataAccessContract() {
   await withMachine(async (machine) => {
     const ctrl = 0x00030001;
@@ -2710,6 +2730,7 @@ const tests = [
   ['LCDIF idle-only control contract', testLcdifIdleOnlyControlContract],
   ['LCDIF FIFO status contract', testLcdifFifoStatusContract],
   ['LCDIF streaming end contract', testLcdifStreamingEndContract],
+  ['LCDIF first read dummy contract', testLcdifFirstReadDummyContract],
   ['LCDIF data access contract', testLcdifDataAccessContract],
   ['PINCTRL Bank 3 absence', testPinctrlBank3Absent],
   ['ICOLL core contract', testIcollCoreContract],
