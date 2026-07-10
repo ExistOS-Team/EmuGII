@@ -27,6 +27,7 @@
 #include "hw/gpio/stmp3770_pinctrl.h"
 #include "hw/intc/stmp3770_icoll.h"
 #include "hw/misc/stmp3770_clkctrl.h"
+#include "hw/misc/stmp3770_dcp.h"
 #include "hw/misc/stmp3770_digctl.h"
 #include "hw/misc/stmp3770_lradc.h"
 #include "hw/misc/stmp3770_power.h"
@@ -64,6 +65,9 @@ struct STMP3770State {
 
     /* Clock control - CLKCTRL */
     STMP3770CLKCTRLState *clkctrl;
+
+    /* Data co-processor */
+    STMP3770DCPState *dcp;
 
     /* Digital control - DIGCTL */
     STMP3770DIGCTLState *digctl;
@@ -147,6 +151,10 @@ struct STMP3770State {
 /* Pin Control and GPIO (PINCTRL) */
 #define STMP3770_PINCTRL_ADDR       0x80018000
 #define STMP3770_PINCTRL_SIZE       0x2000
+
+/* Data Co-Processor (DCP) */
+#define STMP3770_DCP_ADDR           0x80028000
+#define STMP3770_DCP_SIZE           0x2000
 
 /* OCOTP (One-Time Programmable memory) */
 #define STMP3770_OCOTP_ADDR         0x8002C000

@@ -126,6 +126,7 @@ static void stmp3770_dig_reset(void *opaque)
     device_cold_reset(DEVICE(s->ocotp));
     device_cold_reset(DEVICE(s->apbh_dma));
     device_cold_reset(DEVICE(s->apbx_dma));
+    device_cold_reset(DEVICE(s->dcp));
     device_cold_reset(DEVICE(s->gpmi));
     device_cold_reset(DEVICE(s->bch));
     device_cold_reset(DEVICE(s->i2c));
@@ -165,6 +166,10 @@ static void stmp3770_init(Object *obj)
     s->power = STMP3770_POWER(object_new(TYPE_STMP3770_POWER));
     object_property_add_child(obj, "power", OBJECT(s->power));
     object_unref(OBJECT(s->power));
+
+    s->dcp = STMP3770_DCP(object_new(TYPE_STMP3770_DCP));
+    object_property_add_child(obj, "dcp", OBJECT(s->dcp));
+    object_unref(OBJECT(s->dcp));
 
     /* Initialize digital controller (DIGCTL) */
     s->digctl = STMP3770_DIGCTL(object_new(TYPE_STMP3770_DIGCTL));
@@ -314,6 +319,16 @@ static void stmp3770_realize(DeviceState *dev, Error **errp)
         return;
     }
     sysbus_mmio_map(SYS_BUS_DEVICE(s->power), 0, STMP3770_POWER_ADDR);
+
+    /* Realize DCP before the APBX/DCP address window. */
+    if (!sysbus_realize(SYS_BUS_DEVICE(s->dcp), errp)) {
+        return;
+    }
+    sysbus_mmio_map(SYS_BUS_DEVICE(s->dcp), 0, STMP3770_DCP_ADDR);
+    sysbus_connect_irq(SYS_BUS_DEVICE(s->dcp), 0,
+                       qdev_get_gpio_in(DEVICE(s->icoll), STMP3770_IRQ_DCP_VMI));
+    sysbus_connect_irq(SYS_BUS_DEVICE(s->dcp), 1,
+                       qdev_get_gpio_in(DEVICE(s->icoll), STMP3770_IRQ_DCP));
 
     /* Realize digital controller (DIGCTL) */
     if (!sysbus_realize(SYS_BUS_DEVICE(s->digctl), errp)) {

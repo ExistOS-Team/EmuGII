@@ -18,6 +18,7 @@ const CLKCTRL_BASE = 0x80040000;
 const DIGCTL_BASE = 0x8001c000;
 const PINCTRL_BASE = 0x80018000;
 const DFLPT_BASE = 0x800c0000;
+const DCP_BASE = 0x80028000;
 const LCDIF_BASE = 0x80030000;
 const OCOTP_BASE = 0x8002c000;
 const POWER_BASE = 0x80044000;
@@ -1734,6 +1735,302 @@ async function testUsbGptimerContract() {
   });
 }
 
+async function testDcpRegisterAndMemcopyContract() {
+  await withMachine(async (machine) => {
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x000),
+      0xf0800000,
+      'DCP CTRL must reset with SFTRST, CLKGATE, crypto, CSC, and gather capability bits',
+    );
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x010),
+      0x10000000,
+      'DCP STAT must report OTP_KEY_READY after reset',
+    );
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x020),
+      0,
+      'DCP CHANNELCTRL must reset disabled',
+    );
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x030),
+      0x00000404,
+      'DCP CAPABILITY0 must report four channels and four key slots',
+    );
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x040),
+      0x00010001,
+      'DCP CAPABILITY1 must report SHA1 and AES128 support',
+    );
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x420),
+      0x01000000,
+      'DCP VERSION must report v1.0',
+    );
+
+    await machine.writel(DCP_BASE + 0x008, 0xc0800000);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x000),
+      0x30000000,
+      'DCP CTRL_CLR must release reset and gate while preserving read-only present bits',
+    );
+    await machine.writel(DCP_BASE + 0x004, 0x00e001ff);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x000),
+      0x30e001ff,
+      'DCP CTRL_SET must retain only documented writable control bits',
+    );
+    await machine.writel(DCP_BASE + 0x00c, 0xffffffff);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x000),
+      0xf0800000,
+      'DCP CTRL_TOG must reset the block while preserving the documented reset contract',
+    );
+    await machine.writel(DCP_BASE + 0x008, 0xc0000000);
+    await machine.writel(DCP_BASE + 0x100, 0x00000100);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x100),
+      0x00000100,
+      'DCP CH0CMDPTR must retain the descriptor address',
+    );
+    await machine.writel(DCP_BASE + 0x110, 0x00000002);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x110),
+      0x00020000,
+      'DCP CH0SEMA must expose its atomic count only in VALUE[23:16]',
+    );
+    await machine.writel(DCP_BASE + 0x118, 0x000000ff);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x110),
+      0,
+      'DCP CH0SEMA_CLR must clear the semaphore count',
+    );
+    await machine.writel(DCP_BASE + 0x120, 0xffffffff);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x120),
+      0x00ff003e,
+      'DCP CH0STAT must retain only its documented software-clearable error fields',
+    );
+    await machine.writel(DCP_BASE + 0x128, 0x00ff003e);
+
+    await machine.writel(DCP_BASE + 0x004, 0x00000001);
+    await machine.writel(DCP_BASE + 0x024, 0x00000001);
+
+    const descriptor = 0x00000100;
+    const source = 0x00000200;
+    const destination = 0x00000300;
+    const tag = 0x5a;
+    const control = (tag << 24) | 0x00000013;
+
+    await machine.writel(source, 0x11223344);
+    await machine.writel(source + 4, 0x55667788);
+    await machine.writel(descriptor + 0x00, 0);
+    await machine.writel(descriptor + 0x04, control);
+    await machine.writel(descriptor + 0x08, 0);
+    await machine.writel(descriptor + 0x0c, source);
+    await machine.writel(descriptor + 0x10, destination);
+    await machine.writel(descriptor + 0x14, 8);
+    await machine.writel(descriptor + 0x18, 0);
+    await machine.writel(descriptor + 0x1c, 0);
+
+    await machine.writel(DCP_BASE + 0x100, descriptor);
+    await machine.writel(DCP_BASE + 0x110, 1);
+    assert.equal(
+      await machine.readl(destination),
+      0x11223344,
+      'DCP CH0 memcopy must transfer the first source word into SRAM',
+    );
+    assert.equal(
+      await machine.readl(destination + 4),
+      0x55667788,
+      'DCP CH0 memcopy must transfer the complete requested buffer',
+    );
+    assert.equal(
+      await machine.readl(descriptor + 0x1c),
+      0x5a000001,
+      'DCP must write the descriptor completion status with the command tag',
+    );
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x120),
+      0x5a000000,
+      'DCP CH0STAT must retain the completed command tag',
+    );
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x090),
+      control,
+      'DCP PACKET1 must expose the active descriptor control snapshot',
+    );
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x0b0),
+      source,
+      'DCP PACKET3 must expose the active descriptor source snapshot',
+    );
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x0c0),
+      destination,
+      'DCP PACKET4 must expose the active descriptor destination snapshot',
+    );
+    assert.notEqual(
+      (await machine.readl(DCP_BASE + 0x010)) & 1,
+      0,
+      'DCP must latch CH0 interrupt status after an interrupting descriptor',
+    );
+    assert.notEqual(
+      (await machine.readl(ICOLL_BASE + 0x050)) & (1 << 21),
+      0,
+      'DCP CH0 must assert the dedicated DCP VMI interrupt on ICOLL source 53',
+    );
+    await machine.writel(DCP_BASE + 0x018, 1);
+    assert.equal(
+      (await machine.readl(ICOLL_BASE + 0x050)) & (1 << 21),
+      0,
+      'DCP STAT_CLR must deassert the DCP VMI interrupt after acknowledgment',
+    );
+  });
+}
+
+async function testDcpChannelRegisterMapContract() {
+  await withMachine(async (machine) => {
+    for (const channel of [1, 2, 3]) {
+      const base = DCP_BASE + 0x100 + channel * 0x40;
+      const command = 0x01020304 * (channel + 1);
+
+      await machine.writel(base + 0x00, command);
+      assert.equal(
+        await machine.readl(base + 0x00),
+        command,
+        `DCP CH${channel}CMDPTR must retain its descriptor pointer`,
+      );
+      await machine.writel(base + 0x10, 2);
+      assert.equal(
+        await machine.readl(base + 0x10),
+        0x00020000,
+        `DCP CH${channel}SEMA must expose its count in VALUE[23:16] only`,
+      );
+      await machine.writel(base + 0x20, 0xffffffff);
+      assert.equal(
+        await machine.readl(base + 0x20),
+        0x00ff003e,
+        `DCP CH${channel}STAT must mask reserved bits`,
+      );
+      await machine.writel(base + 0x30, 0xffffffff);
+      assert.equal(
+        await machine.readl(base + 0x30),
+        0x0000ffff,
+        `DCP CH${channel}OPTS must retain RECOVERY_TIMER only`,
+      );
+    }
+  });
+}
+
+async function testDcpKeyAndContextRegisterContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(DCP_BASE + 0x050, 0x10203040);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x050),
+      0x10203040,
+      'DCP CONTEXT must retain its complete pointer value',
+    );
+    await machine.writel(DCP_BASE + 0x060, 0xffffffff);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x060),
+      0x00000033,
+      'DCP KEY must retain only INDEX and SUBWORD fields',
+    );
+    await machine.writel(DCP_BASE + 0x070, 0xa5a55a5a);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x060),
+      0x00000030,
+      'DCP KEYDATA writes must advance KEY.SUBWORD with wraparound',
+    );
+    await machine.writel(DCP_BASE + 0x060, 0x00000033);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x070),
+      0xa5a55a5a,
+      'DCP KEYDATA must expose the selected stored key word',
+    );
+  });
+}
+
+async function testDcpCscRegisterMapContract() {
+  await withMachine(async (machine) => {
+    const coefficientResets = [
+      [0x380, 0x012a8010],
+      [0x390, 0x01980204],
+      [0x3a0, 0x00d00064],
+    ];
+    const coefficientMasks = [0x03ffffff, 0x03ff03ff, 0x03ff03ff];
+
+    for (const [offset, value] of coefficientResets) {
+      assert.equal(
+        await machine.readl(DCP_BASE + offset),
+        value,
+        `DCP CSC coefficient at 0x${offset.toString(16)} must have its documented reset`,
+      );
+    }
+    await machine.writel(DCP_BASE + 0x300, 0xffffffff);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x300),
+      0x00007ff1,
+      'DCP CSCCTRL0 must mask all reserved control bits',
+    );
+    await machine.writel(DCP_BASE + 0x310, 0xffffffff);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x310),
+      0x00ff0035,
+      'DCP CSCSTAT must retain only documented status fields',
+    );
+    await machine.writel(DCP_BASE + 0x320, 0xffffffff);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x320),
+      0x00ffffff,
+      'DCP CSCOUTBUFPARAM must retain its 24 documented bits',
+    );
+    await machine.writel(DCP_BASE + 0x330, 0xffffffff);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x330),
+      0x00000fff,
+      'DCP CSCINBUFPARAM must retain its 12 documented bits',
+    );
+    for (const offset of [0x340, 0x350, 0x360, 0x370]) {
+      await machine.writel(DCP_BASE + offset, 0x10203040 + offset);
+      assert.equal(
+        await machine.readl(DCP_BASE + offset),
+        0x10203040 + offset,
+        `DCP CSC working pointer at 0x${offset.toString(16)} must be writable`,
+      );
+    }
+    for (const [index, [offset]] of coefficientResets.entries()) {
+      await machine.writel(DCP_BASE + offset, 0xffffffff);
+      assert.equal(
+        await machine.readl(DCP_BASE + offset),
+        coefficientMasks[index],
+        `DCP CSC coefficient at 0x${offset.toString(16)} must hide reserved bits`,
+      );
+    }
+    for (const offset of [0x3e0, 0x3f0]) {
+      await machine.writel(DCP_BASE + offset, 0xffffffff);
+      assert.equal(
+        await machine.readl(DCP_BASE + offset),
+        0x03ffffff,
+        `DCP CSC scale at 0x${offset.toString(16)} must retain documented bits`,
+      );
+    }
+    await machine.writel(DCP_BASE + 0x400, 0xffffffff);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x400),
+      0x000000ff,
+      'DCP DBGSELECT must retain only its byte-wide selector',
+    );
+    await machine.writel(DCP_BASE + 0x410, 0xffffffff);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x410),
+      0,
+      'DCP DBGDATA must remain read-only',
+    );
+  });
+}
+
 async function testLcdifDataAccessContract() {
   await withMachine(async (machine) => {
     const ctrl = 0x00030001;
@@ -3104,6 +3401,10 @@ const tests = [
   ['USBCTRL device control contract', testUsbDeviceControlContract],
   ['USBCTRL endpoint register contract', testUsbEndpointRegisterContract],
   ['USBCTRL GPTIMER contract', testUsbGptimerContract],
+  ['DCP register and memcopy contract', testDcpRegisterAndMemcopyContract],
+  ['DCP channel register map contract', testDcpChannelRegisterMapContract],
+  ['DCP key and context register contract', testDcpKeyAndContextRegisterContract],
+  ['DCP CSC register map contract', testDcpCscRegisterMapContract],
   ['LCDIF data access contract', testLcdifDataAccessContract],
   ['PINCTRL Bank 3 absence', testPinctrlBank3Absent],
   ['ICOLL core contract', testIcollCoreContract],
