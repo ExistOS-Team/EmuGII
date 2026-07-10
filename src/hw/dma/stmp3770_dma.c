@@ -143,6 +143,15 @@ void stmp3770_dma_set_channel_handler(STMP3770DMAState *s, int channel,
     s->ch_handler[channel].opaque = opaque;
 }
 
+void stmp3770_dma_set_channel_sense_capable(STMP3770DMAState *s,
+                                            int channel, bool capable)
+{
+    if (channel < 0 || channel >= STMP3770_DMA_NUM_CHANNELS) {
+        return;
+    }
+    s->ch_handler[channel].sense_capable = capable;
+}
+
 /*
  * Load a command descriptor from guest memory.  Returns false if the read
  * fails (bad address).  On success, the loaded_* fields of the channel are
@@ -248,6 +257,7 @@ static void stmp3770_dma_run_channel(STMP3770DMAState *s, int ch_idx)
     bool irq_on_cmplt = (cmd & CMD_IRQONCMPLT) != 0;
     bool decrement_sema = (cmd & CMD_SEMAPHORE) != 0;
     bool chain = (cmd & CMD_CHAIN) != 0;
+    bool sense_branch = false;
     uint32_t phore = (ch->sema >> SEMA_PHORE_SHIFT) & SEMA_PHORE_MASK;
 
     /* Stall if this command would need to decrement a zero semaphore. */
@@ -256,12 +266,15 @@ static void stmp3770_dma_run_channel(STMP3770DMAState *s, int ch_idx)
     }
 
     if (command == COMMAND_DMA_SENSE) {
-        /*
-         * Sense is used by NAND (APBH) to wait for the ready line.  As a
-         * stub we treat the sense input as always true, so we follow the
-         * normal chain (NXTCMDAR).  The alternate chain pointer in BAR is
-         * ignored.
-         */
+        bool sense = false;
+
+        if (s->ch_handler[ch_idx].sense_capable) {
+            sense = s->ch_handler[ch_idx].handler(
+                s, ch_idx, STMP3770_DMA_EVENT_SENSE, NULL, 0,
+                s->ch_handler[ch_idx].opaque) > 0;
+            ch->nxtcmdar = sense ? ch->loaded_bar : ch->loaded_nxtcmdar;
+            sense_branch = true;
+        }
         command = COMMAND_NO_DMA_XFER;
     }
 
@@ -340,9 +353,9 @@ static void stmp3770_dma_run_channel(STMP3770DMAState *s, int ch_idx)
     }
 
     /* Advance command chain */
-    if (chain) {
+    if (!sense_branch && chain) {
         ch->nxtcmdar = ch->loaded_nxtcmdar;
-    } else {
+    } else if (!sense_branch) {
         ch->nxtcmdar = 0;
     }
 
@@ -361,7 +374,7 @@ static void stmp3770_dma_run_channel(STMP3770DMAState *s, int ch_idx)
     }
 
     /* Load and run the next command if the chain continues. */
-    if (chain) {
+    if (chain || sense_branch) {
         if (stmp3770_dma_load_command(s, ch_idx)) {
             stmp3770_dma_run_channel(s, ch_idx);
         }

@@ -30,6 +30,7 @@ typedef enum {
     STMP3770_DMA_EVENT_PIO,
     STMP3770_DMA_EVENT_DATA_READ,   /* DMA reads data from peripheral into buf */
     STMP3770_DMA_EVENT_DATA_WRITE,  /* DMA writes data from buf to peripheral */
+    STMP3770_DMA_EVENT_SENSE,       /* DMA samples the peripheral sense line */
 } STMP3770DMAEvent;
 
 /*
@@ -46,6 +47,7 @@ typedef int (*STMP3770DMAHandler)(struct STMP3770DMAState *dma,
 typedef struct STMP3770DMAChannelHandler {
     STMP3770DMAHandler handler;
     void *opaque;
+    bool sense_capable;
 } STMP3770DMAChannelHandler;
 
 /*
@@ -93,5 +95,7 @@ struct STMP3770DMAState {
 /* Register a callback for a DMA channel (e.g. GPMI on APBH channels 4-7) */
 void stmp3770_dma_set_channel_handler(STMP3770DMAState *s, int channel,
                                       STMP3770DMAHandler handler, void *opaque);
+void stmp3770_dma_set_channel_sense_capable(STMP3770DMAState *s,
+                                            int channel, bool capable);
 
 #endif /* STMP3770_DMA_H */

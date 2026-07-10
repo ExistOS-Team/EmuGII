@@ -75,6 +75,21 @@ static void gpmi_update_irq(STMP3770GPMIState *s)
     qemu_set_irq(s->irq, pending);
 }
 
+static void gpmi_set_compare_result(STMP3770GPMIState *s, unsigned int cs,
+                                    unsigned int channel, bool failed)
+{
+    uint32_t device_bit = 1U << cs;
+    uint32_t sense_bit = 1U << (GPMI_DEBUG_SENSE_SHIFT + channel);
+
+    if (failed) {
+        s->stat |= device_bit;
+        s->debug |= sense_bit;
+    } else {
+        s->stat &= ~device_bit;
+        s->debug &= ~sense_bit;
+    }
+}
+
 static void gpmi_update_fifo_status(STMP3770GPMIState *s)
 {
     s->stat &= ~(GPMI_STAT_FIFO_EMPTY | GPMI_STAT_FIFO_FULL);
@@ -799,6 +814,8 @@ static void gpmi_execute_command(STMP3770GPMIState *s)
     unsigned int address = (s->ctrl0 >> GPMI_CTRL0_ADDRESS_SHIFT) &
                            GPMI_CTRL0_ADDRESS_MASK;
     unsigned int cs = (s->ctrl0 >> GPMI_CTRL0_CS_SHIFT) & GPMI_CTRL0_CS_MASK;
+    unsigned int channel = s->active_dma_channel >= 0 ?
+                           s->active_dma_channel : cs;
     uint32_t count = s->ctrl0 & GPMI_CTRL0_XFER_COUNT_MASK;
 
     if (!gpmi_enabled(s)) {
@@ -879,15 +896,25 @@ static void gpmi_execute_command(STMP3770GPMIState *s)
         break;
 
     case GPMI_COMMAND_MODE_READ_AND_COMPARE:
-        qemu_log_mask(LOG_UNIMP,
-                      "stmp3770-gpmi: READ_AND_COMPARE not implemented\n");
+        {
+            uint16_t data = gpmi_nand_read_data_byte(s);
+            uint16_t reference = s->compare;
+            uint16_t mask = s->compare >> 16;
+
+            if (!(s->ctrl0 & GPMI_CTRL0_WORD_LENGTH)) {
+                data |= (uint16_t)gpmi_nand_read_data_byte(s) << 8;
+            }
+
+            gpmi_set_compare_result(s, cs, channel,
+                                    ((data ^ reference) & mask) != 0);
+        }
         break;
 
     default:
         break;
     }
 
-    s->debug = (cs << 28) | 0x10;  /* ready sense for selected CS */
+    s->debug |= 1U << (GPMI_DEBUG_READY_SHIFT + cs);
     gpmi_update_rdy_timeout(s);
 
     /* Trigger DMA completion interrupt if requested */
@@ -1076,6 +1103,7 @@ static void gpmi_reset(DeviceState *dev)
     s->timing2 = 0x09020101;
     s->stat = GPMI_STAT_PRESENT | GPMI_STAT_FIFO_EMPTY;
     s->debug = 0;
+    s->active_dma_channel = -1;
     gpmi_fifo_clear(s);
 
     gpmi_nand_reset_state(s);
@@ -1232,6 +1260,7 @@ static int stmp3770_gpmi_dma_handler(STMP3770DMAState *dma,
         /* Each descriptor's PIO data is independent; clear stale FIFO bytes. */
         gpmi_fifo_clear(s);
         s->write_cmd_sent = false;
+        s->active_dma_channel = channel - s->dma_channel_base;
 
         if (nwords > 0) {
             ctrl0 = ch->pio_words[0];
@@ -1254,6 +1283,7 @@ static int stmp3770_gpmi_dma_handler(STMP3770DMAState *dma,
                 gpmi_execute_command(s);
             }
         }
+        s->active_dma_channel = -1;
         return nwords * sizeof(uint32_t);
     }
 
@@ -1294,6 +1324,13 @@ static int stmp3770_gpmi_dma_handler(STMP3770DMAState *dma,
         return n;
     }
 
+    if (event == STMP3770_DMA_EVENT_SENSE) {
+        unsigned int gpmi_channel = channel - s->dma_channel_base;
+
+        return gpmi_channel < 4 &&
+               (s->debug & (1U << (GPMI_DEBUG_SENSE_SHIFT + gpmi_channel)));
+    }
+
     return 0;
 }
 
@@ -1312,6 +1349,7 @@ void stmp3770_gpmi_set_dma(STMP3770GPMIState *s, STMP3770DMAState *dma,
     for (i = 0; i < 4; i++) {
         stmp3770_dma_set_channel_handler(dma, channel_base + i,
                                          stmp3770_gpmi_dma_handler, s);
+        stmp3770_dma_set_channel_sense_capable(dma, channel_base + i, true);
     }
 }
 

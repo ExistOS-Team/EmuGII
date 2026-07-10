@@ -94,6 +94,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(STMP3770BCHState, STMP3770_BCH)
 #define GPMI_STAT_FIFO_FULL        (1U << 4)
 #define GPMI_STAT_DEV_ERROR_MASK   0xF
 
+/* DEBUG status bits */
+#define GPMI_DEBUG_READY_SHIFT     28
+#define GPMI_DEBUG_SENSE_SHIFT     20
+
 /* ECCCTRL bits */
 #define GPMI_ECCCTRL_HANDLE_SHIFT   16
 #define GPMI_ECCCTRL_HANDLE_MASK    (0xFFFFU << GPMI_ECCCTRL_HANDLE_SHIFT)
@@ -253,6 +257,7 @@ struct STMP3770GPMIState {
     /* DMA handler registration */
     STMP3770DMAState *dma;
     int dma_channel_base;
+    int active_dma_channel;
 
     /* BCH back-pointer for ECC completion IRQ/status */
     STMP3770BCHState *bch;

@@ -33,6 +33,7 @@ const GPMI_BASE = 0x8000c000;
 const I2C_BASE = 0x80058000;
 const SSP1_BASE = 0x80010000;
 const SSP2_BASE = 0x80034000;
+const APBH_BASE = 0x80004000;
 const APBX_BASE = 0x80024000;
 const APPUART_BASE = 0x8006c000;
 const DBGUART_BASE = 0x80070000;
@@ -2159,6 +2160,105 @@ async function testGpmiEccRegisterContract() {
   });
 }
 
+async function testGpmiCompareSenseContract() {
+  await withMachine(async (machine) => {
+    const senseDescriptor = SRAM_BASE + 0x3000;
+    const successDescriptor = SRAM_BASE + 0x3040;
+    const errorDescriptor = SRAM_BASE + 0x3080;
+    const compareDescriptor = SRAM_BASE + 0x30c0;
+    const apbhChannel4NextCommand = APBH_BASE + 0x210;
+    const apbhChannel4CurrentCommand = APBH_BASE + 0x200;
+    const apbhChannel4Semaphore = APBH_BASE + 0x240;
+    const dmaSense = 3;
+    const dmaTerminal = (1 << 6) | (1 << 3);
+    const runStatusCompare = async (compare, cs = 0, eightBit = true) => {
+      await machine.writel(GPMI_BASE + 0x000, 1 << 23);
+      await machine.writeb(GPMI_BASE + 0x0a0, 0x70);
+      await machine.writel(GPMI_BASE + 0x000, (1 << 29) | (1 << 23) | (cs << 20) | (1 << 17) | 1);
+      await machine.writel(GPMI_BASE + 0x010, compare);
+      await machine.writel(GPMI_BASE + 0x000, (1 << 29) | (2 << 24) | (eightBit ? (1 << 23) : 0) | (cs << 20) | 1);
+    };
+    const writeDescriptor = async (address, next, command, bar) => {
+      await machine.writel(address + 0x00, next);
+      await machine.writel(address + 0x04, command);
+      await machine.writel(address + 0x08, bar);
+    };
+    const runSenseDescriptor = async () => {
+      await machine.writel(apbhChannel4NextCommand, senseDescriptor);
+      await machine.writel(apbhChannel4Semaphore, 1);
+      return await machine.readl(apbhChannel4CurrentCommand);
+    };
+    const runStatusCompareOnChannel4 = async (compare, cs) => {
+      await machine.writel(GPMI_BASE + 0x000, 1 << 23);
+      await machine.writeb(GPMI_BASE + 0x0a0, 0x70);
+      await machine.writel(GPMI_BASE + 0x000, (1 << 29) | (1 << 23) | (cs << 20) | (1 << 17) | 1);
+      await writeDescriptor(
+        compareDescriptor,
+        0,
+        2 << 12,
+        0,
+      );
+      await machine.writel(compareDescriptor + 0x0c, (2 << 24) | (1 << 23) | (cs << 20) | 1);
+      await machine.writel(compareDescriptor + 0x10, compare);
+      await machine.writel(apbhChannel4NextCommand, compareDescriptor);
+      await machine.writel(apbhChannel4Semaphore, 1);
+    };
+
+    await machine.writel(GPMI_BASE + 0x000, 0);
+    await machine.writel(APBH_BASE + 0x008, 0xc0000000);
+    await writeDescriptor(senseDescriptor, successDescriptor, dmaSense, errorDescriptor);
+    await writeDescriptor(successDescriptor, 0, dmaTerminal, 0);
+    await writeDescriptor(errorDescriptor, 0, dmaTerminal, 0);
+
+    await runStatusCompare(0x00ff00e0);
+    assert.equal((await machine.readl(GPMI_BASE + 0x0b0)) & 1, 0, 'GPMI matching compare must keep DEV0_ERROR clear');
+    assert.equal((await machine.readl(GPMI_BASE + 0x0c0)) & (1 << 20), 0, 'GPMI matching compare must clear SENSE0');
+    assert.equal(
+      await runSenseDescriptor(),
+      successDescriptor,
+      'APBH DMA_SENSE must follow NXTCMDAR when the GPMI sense line is false',
+    );
+
+    await runStatusCompare(0x00ff0040);
+    assert.notEqual((await machine.readl(GPMI_BASE + 0x0b0)) & 1, 0, 'GPMI compare mismatch must set DEV0_ERROR');
+    assert.notEqual((await machine.readl(GPMI_BASE + 0x0c0)) & (1 << 20), 0, 'GPMI compare mismatch must set SENSE0');
+    assert.equal(
+      await runSenseDescriptor(),
+      errorDescriptor,
+      'APBH DMA_SENSE must follow BAR when the GPMI sense line is true',
+    );
+
+    await runStatusCompare(0xff0000e0, 0, false);
+    assert.notEqual(
+      (await machine.readl(GPMI_BASE + 0x0b0)) & 1,
+      0,
+      'GPMI compare must apply the upper 8 bits of its 16-bit mask',
+    );
+
+    await runStatusCompareOnChannel4(0x00ff0040, 1);
+    assert.notEqual(
+      (await machine.readl(GPMI_BASE + 0x0b0)) & (1 << 1),
+      0,
+      'GPMI compare must report DEV1_ERROR for a failure on chip select 1',
+    );
+    assert.notEqual(
+      (await machine.readl(GPMI_BASE + 0x0c0)) & (1 << 20),
+      0,
+      'APBH channel 4 must sample GPMI SENSE0 even when the command uses chip select 1',
+    );
+    assert.equal(
+      (await machine.readl(GPMI_BASE + 0x0c0)) & (1 << 21),
+      0,
+      'chip select must not select the GPMI SENSE line',
+    );
+    assert.equal(
+      await runSenseDescriptor(),
+      errorDescriptor,
+      'APBH channel 4 must branch on its own GPMI SENSE0 result',
+    );
+  });
+}
+
 async function testEcc8CompletionResultContract() {
   await withMachine(async (machine) => {
     const payload = SRAM_BASE + 0x1000;
@@ -4217,6 +4317,7 @@ const tests = [
   ['GPMI TIMING2 contract', testGpmiTiming2Contract],
   ['GPMI CTRL1 contract', testGpmiCtrl1Contract],
   ['GPMI ECC register contract', testGpmiEccRegisterContract],
+  ['GPMI compare and DMA sense contract', testGpmiCompareSenseContract],
   ['ECC8 completion result contract', testEcc8CompletionResultContract],
   ['ECC8 register contract', testEcc8RegisterContract],
   ['GPMI DATA FIFO contract', testGpmiDataFifoContract],
