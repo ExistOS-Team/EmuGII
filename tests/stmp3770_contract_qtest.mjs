@@ -489,6 +489,43 @@ async function testTimrotTickAndUpdateContract() {
   });
 }
 
+async function testTimrotExternalEdgeContract() {
+  await withMachine(async (machine) => {
+    const pwm0Active = 0x00010000;
+    const pwm0Period = 0x004b0003;
+
+    await machine.writel(TIMROT_BASE + 0x008, 0xc0000000);
+
+    await machine.writel(TIMROT_BASE + 0x020, 0x00000081);
+    await machine.writel(TIMROT_BASE + 0x030, 1);
+    await machine.writel(TIMROT_BASE + 0x040, 0x00000181);
+    await machine.writel(TIMROT_BASE + 0x050, 1);
+
+    await machine.writel(PWM_BASE + 0x008, 0xc0000000);
+    await machine.writel(PWM_BASE + 0x010, pwm0Active);
+    await machine.writel(PWM_BASE + 0x020, pwm0Period);
+    await machine.writel(PWM_BASE + 0x004, 0x00000001);
+
+    assert.notEqual(
+      (await machine.readl(TIMROT_BASE + 0x020)) & 0x8000,
+      0,
+      'TIMROT POLARITY=0 must decrement a PWM-selected timer on PWM rising edges',
+    );
+    assert.equal(
+      (await machine.readl(TIMROT_BASE + 0x040)) & 0x8000,
+      0,
+      'TIMROT POLARITY=1 must not decrement a PWM-selected timer on PWM rising edges',
+    );
+
+    await machine.clockStep(1_400);
+    assert.notEqual(
+      (await machine.readl(TIMROT_BASE + 0x040)) & 0x8000,
+      0,
+      'TIMROT POLARITY=1 must decrement a PWM-selected timer on PWM falling edges',
+    );
+  });
+}
+
 async function testTimrotDutyCycleContract() {
   await withMachine(async (machine) => {
     await machine.writel(TIMROT_BASE + 0x008, 0xc0000000);
@@ -2418,6 +2455,7 @@ const tests = [
   ['RTC analog seconds run while digital clock gated', testRtcAnalogSecondsRunWhileDigitalClockGated],
   ['RTC millisecond resolution contract', testRtcMsecResolutionContract],
   ['TIMROT tick and update contract', testTimrotTickAndUpdateContract],
+  ['TIMROT external edge contract', testTimrotExternalEdgeContract],
   ['TIMROT duty-cycle contract', testTimrotDutyCycleContract],
   ['TIMROT rotary contract', testTimrotRotaryContract],
   ['TIMROT rotary invalid transition contract', testTimrotRotaryInvalidTransitionContract],

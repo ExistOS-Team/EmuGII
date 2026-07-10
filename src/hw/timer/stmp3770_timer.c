@@ -108,6 +108,9 @@ static void stmp3770_timer_reset(DeviceState *dev);
 static int stmp3770_timer_post_load(void *opaque, int version_id);
 static void stmp3770_timer_rearm_rotary(STMP3770TimerState *s,
                                         bool reset_sampling);
+static void stmp3770_timer_external_edge(STMP3770TimerState *s,
+                                         unsigned int select,
+                                         bool old_level, bool new_level);
 
 static bool stmp3770_timer_is_duty_cycle(const STMP3770TimerChannel *t,
                                          int idx)
@@ -212,6 +215,8 @@ static void stmp3770_timer_rotary_tick(void *opaque)
     unsigned int required = stmp3770_timer_rotary_samples_required(s);
     bool input_a;
     bool input_b;
+    bool old_a;
+    bool old_b;
 
     if (s->rotctrl & (ROTCTRL_SFTRST | ROTCTRL_CLKGATE)) {
         return;
@@ -232,6 +237,8 @@ static void stmp3770_timer_rotary_tick(void *opaque)
         return;
     }
 
+    old_a = s->rotary_stable_a;
+    old_b = s->rotary_stable_b;
     bool changed_a = stmp3770_timer_rotary_debounce(
         input_a, &s->rotary_stable_a, &s->rotary_candidate_a,
         &s->rotary_samples_a, required);
@@ -239,6 +246,14 @@ static void stmp3770_timer_rotary_tick(void *opaque)
         input_b, &s->rotary_stable_b, &s->rotary_candidate_b,
         &s->rotary_samples_b, required);
 
+    if (changed_a) {
+        stmp3770_timer_external_edge(s, TIMCLK_ROTARYA,
+                                     old_a, s->rotary_stable_a);
+    }
+    if (changed_b) {
+        stmp3770_timer_external_edge(s, TIMCLK_ROTARYB,
+                                     old_b, s->rotary_stable_b);
+    }
     if (changed_a || changed_b) {
         stmp3770_timer_rotary_transition(s,
                                          (s->rotary_stable_b << 1) |
@@ -295,6 +310,14 @@ static inline int timcount_idx_from_base(hwaddr base)
     return -1;
 }
 
+static bool stmp3770_timer_external_source(const STMP3770TimerChannel *t)
+{
+    unsigned int select = (t->timctrl >> TIMCTRL_SELECT_SHIFT) &
+                          TIMCTRL_SELECT_MASK;
+
+    return select >= TIMCLK_PWM0 && select <= TIMCLK_ROTARYB;
+}
+
 static uint32_t stmp3770_timer_get_freq(STMP3770TimerState *s, int idx)
 {
     STMP3770TimerChannel *t = &s->timer[idx];
@@ -319,7 +342,7 @@ static uint32_t stmp3770_timer_get_freq(STMP3770TimerState *s, int idx)
     case TIMCLK_PWM4:
     case TIMCLK_ROTARYA:
     case TIMCLK_ROTARYB:
-        /* PWM and rotary inputs are not modelled */
+        /* External inputs advance the counter from their edge detectors. */
         return 0;
     case TIMCLK_32KHZ:
         f = 32768;
@@ -353,6 +376,60 @@ static void stmp3770_timer_update_irq(STMP3770TimerState *s, int idx)
     qemu_set_irq(s->irq[idx], level);
 }
 
+static void stmp3770_timer_decrement_external(STMP3770TimerState *s, int idx)
+{
+    STMP3770TimerChannel *t = &s->timer[idx];
+    uint32_t count;
+
+    if (!t->running || stmp3770_timer_is_duty_cycle(t, idx)) {
+        return;
+    }
+
+    ptimer_transaction_begin(t->ptimer);
+    count = ptimer_get_count(t->ptimer);
+    if (count == 0) {
+        ptimer_transaction_commit(t->ptimer);
+        return;
+    }
+
+    count--;
+    ptimer_set_count(t->ptimer, count);
+    if (count == 0) {
+        t->timctrl |= TIMCTRL_IRQ;
+        if (t->timctrl & TIMCTRL_RELOAD) {
+            ptimer_set_count(t->ptimer, t->fixed_count);
+        } else {
+            t->running = false;
+        }
+    }
+    ptimer_transaction_commit(t->ptimer);
+    stmp3770_timer_update_irq(s, idx);
+}
+
+static void stmp3770_timer_external_edge(STMP3770TimerState *s,
+                                         unsigned int select,
+                                         bool old_level, bool new_level)
+{
+    int idx;
+
+    if (old_level == new_level ||
+        s->rotctrl & (ROTCTRL_SFTRST | ROTCTRL_CLKGATE)) {
+        return;
+    }
+
+    for (idx = 0; idx < STMP3770_NUM_TIMERS; idx++) {
+        STMP3770TimerChannel *t = &s->timer[idx];
+        unsigned int timer_select =
+            (t->timctrl >> TIMCTRL_SELECT_SHIFT) & TIMCTRL_SELECT_MASK;
+        bool falling = old_level && !new_level;
+        bool polarity = (t->timctrl & TIMCTRL_POLARITY) != 0;
+
+        if (timer_select == select && falling == polarity) {
+            stmp3770_timer_decrement_external(s, idx);
+        }
+    }
+}
+
 static void stmp3770_timer_configure(STMP3770TimerState *s, int idx,
                                      bool reload_count)
 {
@@ -360,18 +437,17 @@ static void stmp3770_timer_configure(STMP3770TimerState *s, int idx,
     uint32_t freq = stmp3770_timer_get_freq(s, idx);
     uint32_t limit = t->fixed_count;
     bool periodic = (t->timctrl & TIMCTRL_RELOAD) != 0;
+    bool external = stmp3770_timer_external_source(t);
 
     ptimer_transaction_begin(t->ptimer);
 
-    if (!freq) {
+    if (!freq && !external) {
         ptimer_stop(t->ptimer);
         t->running = false;
         ptimer_transaction_commit(t->ptimer);
         stmp3770_timer_update_irq(s, idx);
         return;
     }
-
-    ptimer_set_freq(t->ptimer, freq);
 
     if (stmp3770_timer_is_duty_cycle(t, idx)) {
         unsigned int test_signal =
@@ -383,6 +459,7 @@ static void stmp3770_timer_configure(STMP3770TimerState *s, int idx,
                 s->pwm_input[test_signal - TIMCLK_PWM0];
             s->test_signal_seen = true;
         }
+        ptimer_set_freq(t->ptimer, freq);
         ptimer_set_limit(t->ptimer, 1, 1);
         ptimer_run(t->ptimer, 0);
         t->running = true;
@@ -399,6 +476,16 @@ static void stmp3770_timer_configure(STMP3770TimerState *s, int idx,
         ptimer_set_limit(t->ptimer, limit, 0);
         ptimer_set_count(t->ptimer, count);
     }
+
+    if (external) {
+        ptimer_stop(t->ptimer);
+        t->running = limit != 0;
+        ptimer_transaction_commit(t->ptimer);
+        stmp3770_timer_update_irq(s, idx);
+        return;
+    }
+
+    ptimer_set_freq(t->ptimer, freq);
 
     /*
      * Do not start the timer if limit is zero - hardware would have
@@ -854,12 +941,17 @@ void stmp3770_timer_set_pwm_input(STMP3770TimerState *s,
     STMP3770TimerChannel *t = &s->timer[3];
     unsigned int test_signal;
     uint16_t count;
+    bool old_level;
 
     if (channel >= STMP3770_TIMER_NUM_PWM_INPUTS) {
         return;
     }
 
+    old_level = s->pwm_input[channel];
     s->pwm_input[channel] = level;
+    stmp3770_timer_external_edge(s, TIMCLK_PWM0 + channel,
+                                 old_level, level);
+
     if (s->rotctrl & (ROTCTRL_SFTRST | ROTCTRL_CLKGATE) ||
         !stmp3770_timer_is_duty_cycle(t, 3)) {
         return;
