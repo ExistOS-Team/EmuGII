@@ -289,6 +289,24 @@ async function testRtcCopyControllerContract() {
   });
 }
 
+async function testRtcClockGateContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(RTC_BASE + 0x008, 0x80000000);
+    assert.equal(
+      (await machine.readl(RTC_BASE + 0x000)) & 0xc0000000,
+      0x40000000,
+      'RTC CTRL_CLR.SFTRST must not clear the independently controlled CLKGATE bit',
+    );
+
+    await machine.writel(RTC_BASE + 0x008, 0x40000000);
+    assert.equal(
+      (await machine.readl(RTC_BASE + 0x000)) & 0xc0000000,
+      0,
+      'RTC CTRL_CLR.CLKGATE must independently enable the digital clock',
+    );
+  });
+}
+
 async function testTimrotTickAndUpdateContract() {
   await withMachine(async (machine) => {
     await machine.writel(TIMROT_BASE + 0x008, 0xc0000000);
@@ -1722,6 +1740,7 @@ const tests = [
   ['RTC 1ms IRQ routing', testRtc1MsecIrq],
   ['RTC reset and persistent0 contract', testRtcResetAndPersistent0Contract],
   ['RTC copy controller contract', testRtcCopyControllerContract],
+  ['RTC clock gate contract', testRtcClockGateContract],
   ['TIMROT tick and update contract', testTimrotTickAndUpdateContract],
   ['PWM register contract', testPwmRegisterContract],
   ['LCDIF CTRL1 interrupt layout', testLcdifCtrl1Layout],

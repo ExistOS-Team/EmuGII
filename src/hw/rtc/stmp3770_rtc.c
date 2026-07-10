@@ -362,8 +362,6 @@ static void stmp3770_rtc_write(void *opaque, hwaddr offset,
          */
         if (s->ctrl & CTRL_SFTRST) {
             s->ctrl |= CTRL_CLKGATE;
-        } else {
-            s->ctrl &= ~CTRL_CLKGATE;
         }
         if ((old_ctrl & CTRL_FORCE_UPDATE) == 0 &&
             (s->ctrl & CTRL_FORCE_UPDATE)) {
