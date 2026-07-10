@@ -45,6 +45,7 @@ typedef struct STMP3770PWMCallbackInfo {
 } STMP3770PWMCallbackInfo;
 
 typedef struct STMP3770PINCTRLState STMP3770PINCTRLState;
+typedef struct STMP3770TimerState STMP3770TimerState;
 
 struct STMP3770PWMState {
     SysBusDevice parent_obj;
@@ -58,6 +59,7 @@ struct STMP3770PWMState {
     STMP3770PWMChannel channel[STMP3770_PWM_NUM_CHANNELS];
     STMP3770PWMCallbackInfo cb_info[STMP3770_PWM_NUM_CHANNELS];
     STMP3770PINCTRLState *pinctrl;
+    STMP3770TimerState *timer;
     bool pwm2_analog_enable;
 };
 
@@ -65,5 +67,6 @@ void stmp3770_pwm_set_pinctrl(STMP3770PWMState *s,
                                STMP3770PINCTRLState *pinctrl);
 void stmp3770_pwm_set_pwm2_analog_enable(STMP3770PWMState *s,
                                           bool enabled);
+void stmp3770_pwm_set_timer(STMP3770PWMState *s, STMP3770TimerState *timer);
 
 #endif /* STMP3770_PWM_H */

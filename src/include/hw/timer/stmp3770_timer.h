@@ -21,6 +21,7 @@
 OBJECT_DECLARE_SIMPLE_TYPE(STMP3770TimerState, STMP3770_TIMER)
 
 #define STMP3770_NUM_TIMERS 4
+#define STMP3770_TIMER_NUM_PWM_INPUTS 5
 
 typedef struct STMP3770TimerChannel {
     uint32_t timctrl;
@@ -43,6 +44,13 @@ struct STMP3770TimerState {
     /* Rotary decoder */
     uint32_t rotctrl;
     uint32_t rotcount;
+    uint8_t pwm_input[STMP3770_TIMER_NUM_PWM_INPUTS];
+    uint16_t duty_running_count;
+    uint16_t duty_low_count;
+    uint16_t duty_high_count;
+    bool duty_have_high;
+    bool test_signal_level;
+    bool test_signal_seen;
 
     /* Per-timer state */
     STMP3770TimerChannel timer[STMP3770_NUM_TIMERS];
@@ -51,5 +59,8 @@ struct STMP3770TimerState {
 
     uint32_t version;
 };
+
+void stmp3770_timer_set_pwm_input(STMP3770TimerState *s,
+                                  unsigned int channel, bool level);
 
 #endif /* STMP3770_TIMER_H */

@@ -102,19 +102,44 @@
 #define STMP3770_TIMROT_APB_FREQ    24000000
 
 static void stmp3770_timer_reset(DeviceState *dev);
+static int stmp3770_timer_post_load(void *opaque, int version_id);
+
+static bool stmp3770_timer_is_duty_cycle(const STMP3770TimerChannel *t,
+                                         int idx)
+{
+    return idx == 3 && (t->timctrl & TIMCTRL3_DUTY_CYCLE);
+}
+
+static void stmp3770_timer_reset_duty_cycle(STMP3770TimerState *s)
+{
+    s->timer[3].timctrl &= ~TIMCTRL3_DUTY_VALID;
+    s->duty_running_count = 0;
+    s->duty_low_count = 0;
+    s->duty_high_count = 0;
+    s->duty_have_high = false;
+    s->test_signal_seen = false;
+}
 
 static inline int timctrl_idx_from_base(hwaddr base)
 {
-    if (base >= REG_TIMCTRL(0) && base < REG_TIMCTRL(STMP3770_NUM_TIMERS)) {
-        return (base - REG_TIMCTRL(0)) >> 5;
+    int idx;
+
+    for (idx = 0; idx < STMP3770_NUM_TIMERS; idx++) {
+        if (base == REG_TIMCTRL(idx)) {
+            return idx;
+        }
     }
     return -1;
 }
 
 static inline int timcount_idx_from_base(hwaddr base)
 {
-    if (base >= REG_TIMCOUNT(0) && base < REG_TIMCOUNT(STMP3770_NUM_TIMERS)) {
-        return (base - REG_TIMCOUNT(0)) >> 5;
+    int idx;
+
+    for (idx = 0; idx < STMP3770_NUM_TIMERS; idx++) {
+        if (base == REG_TIMCOUNT(idx)) {
+            return idx;
+        }
     }
     return -1;
 }
@@ -197,6 +222,23 @@ static void stmp3770_timer_configure(STMP3770TimerState *s, int idx,
 
     ptimer_set_freq(t->ptimer, freq);
 
+    if (stmp3770_timer_is_duty_cycle(t, idx)) {
+        unsigned int test_signal =
+            (t->timctrl >> TIMCTRL3_TEST_SIGNAL_SHIFT) &
+            TIMCTRL3_TEST_SIGNAL_MASK;
+
+        if (test_signal >= TIMCLK_PWM0 && test_signal <= TIMCLK_PWM4) {
+            s->test_signal_level =
+                s->pwm_input[test_signal - TIMCLK_PWM0];
+            s->test_signal_seen = true;
+        }
+        ptimer_set_limit(t->ptimer, 1, 1);
+        ptimer_run(t->ptimer, 0);
+        t->running = true;
+        ptimer_transaction_commit(t->ptimer);
+        return;
+    }
+
     if (reload_count || !t->running) {
         /* Load the running counter from the fixed count */
         ptimer_set_limit(t->ptimer, limit, 1);
@@ -233,6 +275,11 @@ static void stmp3770_timer_tick(void *opaque)
     STMP3770TimerState *s = info->s;
     int idx = info->idx;
     STMP3770TimerChannel *t = &s->timer[idx];
+
+    if (stmp3770_timer_is_duty_cycle(t, idx)) {
+        s->duty_running_count++;
+        return;
+    }
 
     t->timctrl |= TIMCTRL_IRQ;
     /* For oneshot mode the ptimer stops automatically */
@@ -291,6 +338,11 @@ static uint64_t stmp3770_timer_read(void *opaque, hwaddr offset, unsigned size)
     if (idx >= 0 && idx < STMP3770_NUM_TIMERS) {
         STMP3770TimerChannel *t = &s->timer[idx];
         uint32_t running;
+
+        if (stmp3770_timer_is_duty_cycle(t, idx)) {
+            return ((uint32_t)s->duty_low_count << 16) |
+                   s->duty_high_count;
+        }
 
         ptimer_transaction_begin(t->ptimer);
         running = (uint32_t)ptimer_get_count(t->ptimer);
@@ -366,8 +418,18 @@ static void stmp3770_timer_write_timctrl(STMP3770TimerState *s, int idx,
 
     if ((old ^ t->timctrl) & (TIMCTRL_SELECT_MASK |
                                (TIMCTRL_PRESCALE_MASK << TIMCTRL_PRESCALE_SHIFT) |
-                               TIMCTRL_RELOAD | TIMCTRL_IRQ_EN)) {
-        stmp3770_timer_configure(s, idx, false);
+                               TIMCTRL_RELOAD | TIMCTRL_IRQ_EN |
+                               TIMCTRL3_DUTY_CYCLE |
+                               (TIMCTRL3_TEST_SIGNAL_MASK <<
+                                TIMCTRL3_TEST_SIGNAL_SHIFT))) {
+        if (idx == 3) {
+            stmp3770_timer_reset_duty_cycle(s);
+        }
+        stmp3770_timer_configure(s, idx,
+                                 stmp3770_timer_is_duty_cycle(t, idx));
+    } else if (idx == 3) {
+        t->timctrl &= ~TIMCTRL3_DUTY_VALID;
+        s->duty_have_high = false;
     }
 
     stmp3770_timer_update_irq(s, idx);
@@ -467,6 +529,13 @@ static void stmp3770_timer_reset(DeviceState *dev)
         t->running = false;
         stmp3770_timer_update_irq(s, i);
     }
+    memset(s->pwm_input, 0, sizeof(s->pwm_input));
+    s->duty_running_count = 0;
+    s->duty_low_count = 0;
+    s->duty_high_count = 0;
+    s->duty_have_high = false;
+    s->test_signal_level = false;
+    s->test_signal_seen = false;
 }
 
 static void stmp3770_timer_init(Object *obj)
@@ -514,11 +583,20 @@ static const VMStateDescription vmstate_stmp3770_timer_channel = {
 
 static const VMStateDescription vmstate_stmp3770_timer = {
     .name = TYPE_STMP3770_TIMER,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
+    .post_load = stmp3770_timer_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(rotctrl, STMP3770TimerState),
         VMSTATE_UINT32(rotcount, STMP3770TimerState),
+        VMSTATE_UINT8_ARRAY_V(pwm_input, STMP3770TimerState,
+                              STMP3770_TIMER_NUM_PWM_INPUTS, 2),
+        VMSTATE_UINT16_V(duty_running_count, STMP3770TimerState, 2),
+        VMSTATE_UINT16_V(duty_low_count, STMP3770TimerState, 2),
+        VMSTATE_UINT16_V(duty_high_count, STMP3770TimerState, 2),
+        VMSTATE_BOOL_V(duty_have_high, STMP3770TimerState, 2),
+        VMSTATE_BOOL_V(test_signal_level, STMP3770TimerState, 2),
+        VMSTATE_BOOL_V(test_signal_seen, STMP3770TimerState, 2),
         VMSTATE_UINT32(version, STMP3770TimerState),
         VMSTATE_STRUCT_ARRAY(timer, STMP3770TimerState, STMP3770_NUM_TIMERS,
                              0, vmstate_stmp3770_timer_channel,
@@ -526,6 +604,68 @@ static const VMStateDescription vmstate_stmp3770_timer = {
         VMSTATE_END_OF_LIST()
     }
 };
+
+static int stmp3770_timer_post_load(void *opaque, int version_id)
+{
+    STMP3770TimerState *s = STMP3770_TIMER(opaque);
+
+    if (version_id < 2) {
+        memset(s->pwm_input, 0, sizeof(s->pwm_input));
+        s->duty_running_count = 0;
+        s->duty_low_count = 0;
+        s->duty_high_count = 0;
+        s->duty_have_high = false;
+        s->test_signal_level = false;
+        s->test_signal_seen = false;
+    }
+    return 0;
+}
+
+void stmp3770_timer_set_pwm_input(STMP3770TimerState *s,
+                                  unsigned int channel, bool level)
+{
+    STMP3770TimerChannel *t = &s->timer[3];
+    unsigned int test_signal;
+    uint16_t count;
+
+    if (channel >= STMP3770_TIMER_NUM_PWM_INPUTS) {
+        return;
+    }
+
+    s->pwm_input[channel] = level;
+    if (s->rotctrl & (ROTCTRL_SFTRST | ROTCTRL_CLKGATE) ||
+        !stmp3770_timer_is_duty_cycle(t, 3)) {
+        return;
+    }
+
+    test_signal = (t->timctrl >> TIMCTRL3_TEST_SIGNAL_SHIFT) &
+                  TIMCTRL3_TEST_SIGNAL_MASK;
+    if (test_signal != TIMCLK_PWM0 + channel) {
+        return;
+    }
+
+    if (!s->test_signal_seen) {
+        s->test_signal_level = level;
+        s->test_signal_seen = true;
+        return;
+    }
+    if (s->test_signal_level == level) {
+        return;
+    }
+
+    s->test_signal_level = level;
+    count = s->duty_running_count;
+    s->duty_running_count = 0;
+    if (level) {
+        s->duty_low_count = count;
+        if (s->duty_have_high) {
+            t->timctrl |= TIMCTRL3_DUTY_VALID;
+        }
+    } else {
+        s->duty_high_count = count;
+        s->duty_have_high = true;
+    }
+}
 
 static void stmp3770_timer_class_init(ObjectClass *oc, const void *data)
 {

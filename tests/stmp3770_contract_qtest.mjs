@@ -489,6 +489,58 @@ async function testTimrotTickAndUpdateContract() {
   });
 }
 
+async function testTimrotDutyCycleContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(TIMROT_BASE + 0x008, 0xc0000000);
+    await machine.writel(TIMROT_BASE + 0x080, 0x0002020c);
+    assert.equal(
+      await machine.readl(TIMROT_BASE + 0x080),
+      0x0002020c,
+      'TIMROT Timer3 control must decode at its documented 0x80 offset',
+    );
+
+    await machine.writel(PWM_BASE + 0x008, 0xc0000000);
+    await machine.writel(PWM_BASE + 0x030, 0x00010000);
+    await machine.writel(PWM_BASE + 0x040, 0x000b0003);
+    await machine.writel(PWM_BASE + 0x004, 0x00000002);
+
+    await machine.clockStep(1_000);
+
+    const dutyCtrl = await machine.readl(TIMROT_BASE + 0x080);
+    const dutyCount = await machine.readl(TIMROT_BASE + 0x090);
+
+    assert.notEqual(
+      dutyCtrl & 0x00000400,
+      0,
+      `TIMROT Timer3 must set DUTY_VALID after sampling PWM1 high and low intervals: ctrl=0x${dutyCtrl.toString(16)}, count=0x${dutyCount.toString(16)}`,
+    );
+    assert.notEqual(
+      dutyCount >>> 16,
+      0,
+      'TIMROT Timer3 duty mode must latch a nonzero low interval on PWM1 rising edge',
+    );
+    assert.notEqual(
+      dutyCount & 0xffff,
+      0,
+      'TIMROT Timer3 duty mode must latch a nonzero high interval on PWM1 falling edge',
+    );
+
+    await machine.writel(TIMROT_BASE + 0x080, 0x0002020c);
+    assert.equal(
+      (await machine.readl(TIMROT_BASE + 0x080)) & 0x00000400,
+      0,
+      'TIMROT Timer3 control writes must clear DUTY_VALID while duty mode remains enabled',
+    );
+
+    await machine.writel(TIMROT_BASE + 0x088, 0x00000200);
+    assert.equal(
+      (await machine.readl(TIMROT_BASE + 0x080)) & 0x00000400,
+      0,
+      'TIMROT Timer3 must clear DUTY_VALID when duty-cycle mode is disabled',
+    );
+  });
+}
+
 async function testPwmRegisterContract() {
   await withMachine(async (machine) => {
     assert.equal(
@@ -2299,6 +2351,7 @@ const tests = [
   ['RTC analog seconds run while digital clock gated', testRtcAnalogSecondsRunWhileDigitalClockGated],
   ['RTC millisecond resolution contract', testRtcMsecResolutionContract],
   ['TIMROT tick and update contract', testTimrotTickAndUpdateContract],
+  ['TIMROT duty-cycle contract', testTimrotDutyCycleContract],
   ['PWM register contract', testPwmRegisterContract],
   ['PWM waveform contract', testPwmWaveformContract],
   ['PWM MATT contract', testPwmMattContract],

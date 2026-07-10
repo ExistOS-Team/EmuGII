@@ -24,6 +24,7 @@
 #include "qemu/module.h"
 #include "hw/gpio/stmp3770_pinctrl.h"
 #include "hw/timer/stmp3770_pwm.h"
+#include "hw/timer/stmp3770_timer.h"
 
 #define PWM_VERSION     0x01010000
 
@@ -102,6 +103,9 @@ static void pwm_update_output(STMP3770PWMState *s, unsigned ch)
 
     if (s->pinctrl) {
         stmp3770_pinctrl_set_pwm_output(s->pinctrl, ch, level);
+    }
+    if (s->timer) {
+        stmp3770_timer_set_pwm_input(s->timer, ch, level == 1);
     }
 }
 
@@ -466,6 +470,16 @@ void stmp3770_pwm_set_pwm2_analog_enable(STMP3770PWMState *s,
 {
     s->pwm2_analog_enable = enabled;
     pwm_update_output(s, 2);
+}
+
+void stmp3770_pwm_set_timer(STMP3770PWMState *s, STMP3770TimerState *timer)
+{
+    unsigned ch;
+
+    s->timer = timer;
+    for (ch = 0; ch < STMP3770_PWM_NUM_CHANNELS; ch++) {
+        pwm_update_output(s, ch);
+    }
 }
 
 static const TypeInfo pwm_type_info = {
