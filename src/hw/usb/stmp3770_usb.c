@@ -64,9 +64,6 @@
 #define REG_ENDPTCTRL2      0x1C8
 #define REG_ENDPTCTRL3      0x1CC
 #define REG_ENDPTCTRL4      0x1D0
-#define REG_ENDPTCTRL5      0x1D4
-#define REG_ENDPTCTRL6      0x1D8
-#define REG_ENDPTCTRL7      0x1DC
 
 #define USBCMD_RST          (1U << 1)
 #define USBCMD_RUN          (1U << 0)
@@ -85,6 +82,11 @@
 #define USBCTRL_TTCTRL_WRITABLE_MASK    0x7F000000
 #define USBCTRL_BURSTSIZE_WRITABLE_MASK 0x0000FFFF
 #define USBCTRL_USBMODE_WRITABLE_MASK   0x0000003F
+#define USBCTRL_ENDPOINT_BITMAP_MASK     0x001F001F
+#define USBCTRL_ENDPTSETUP_MASK          0x0000001F
+#define USBCTRL_ENDPTCTRL0_WRITABLE_MASK 0x000D000D
+#define USBCTRL_ENDPTCTRL0_RESET         0x00800080
+#define USBCTRL_ENDPTCTRLN_WRITABLE_MASK 0x00AF00AF
 
 #define USBCTRL_ID_RESET            0x0042FA05
 #define USBCTRL_ARC_GENERAL_RESET   0x00000015
@@ -137,6 +139,7 @@ static void usb_controller_reset(STMP3770USBState *s)
     s->endptstat = 0;
     s->endptcomplete = 0;
     memset(s->endptctrl, 0, sizeof(s->endptctrl));
+    s->endptctrl[0] = USBCTRL_ENDPTCTRL0_RESET;
     memset(s->gptimer, 0, sizeof(s->gptimer));
 }
 
@@ -244,7 +247,7 @@ static uint64_t usb_read(void *opaque, hwaddr offset, unsigned size)
         return s->endptstat;
     case REG_ENDPTCOMPLETE:
         return s->endptcomplete;
-    case REG_ENDPTCTRL0 ... REG_ENDPTCTRL7:
+    case REG_ENDPTCTRL0 ... REG_ENDPTCTRL4:
         return s->endptctrl[(offset - REG_ENDPTCTRL0) / 4];
     default:
         qemu_log_mask(LOG_GUEST_ERROR,
@@ -330,22 +333,27 @@ static void usb_write(void *opaque, hwaddr offset,
         }
         break;
     case REG_ENDPTSETUPSTAT:
-        s->endptsetupstat &= ~((uint32_t)value & 0xFFFF);
+        s->endptsetupstat &= ~((uint32_t)value & USBCTRL_ENDPTSETUP_MASK);
         break;
     case REG_ENDPTPRIME:
         /* For stub, immediately clear prime and set status */
-        s->endptprime &= ~((uint32_t)value & 0xFFFFFFFF);
-        s->endptstat |= ((uint32_t)value & 0xFFFFFFFF);
+        s->endptprime = 0;
+        s->endptstat |= (uint32_t)value & USBCTRL_ENDPOINT_BITMAP_MASK;
         break;
     case REG_ENDPTFLUSH:
-        s->endptflush &= ~((uint32_t)value & 0xFFFFFFFF);
-        s->endptstat &= ~((uint32_t)value & 0xFFFFFFFF);
+        s->endptflush = 0;
+        s->endptstat &= ~((uint32_t)value & USBCTRL_ENDPOINT_BITMAP_MASK);
         break;
     case REG_ENDPTCOMPLETE:
-        s->endptcomplete &= ~((uint32_t)value & 0xFFFFFFFF);
+        s->endptcomplete &= ~((uint32_t)value & USBCTRL_ENDPOINT_BITMAP_MASK);
         break;
-    case REG_ENDPTCTRL0 ... REG_ENDPTCTRL7:
-        s->endptctrl[(offset - REG_ENDPTCTRL0) / 4] = (uint32_t)value;
+    case REG_ENDPTCTRL0:
+        s->endptctrl[0] = USBCTRL_ENDPTCTRL0_RESET |
+                          ((uint32_t)value & USBCTRL_ENDPTCTRL0_WRITABLE_MASK);
+        break;
+    case REG_ENDPTCTRL1 ... REG_ENDPTCTRL4:
+        s->endptctrl[(offset - REG_ENDPTCTRL0) / 4] =
+            (uint32_t)value & USBCTRL_ENDPTCTRLN_WRITABLE_MASK;
         break;
     case REG_GPTIMER0CTRL:
     case REG_GPTIMER1CTRL:
@@ -391,7 +399,7 @@ static void usb_realize(DeviceState *dev, Error **errp)
 
 static const VMStateDescription vmstate_usb = {
     .name = "stmp3770-usb",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(usbcmd, STMP3770USBState),
@@ -416,7 +424,7 @@ static const VMStateDescription vmstate_usb = {
         VMSTATE_UINT32(endptstat, STMP3770USBState),
         VMSTATE_UINT32(endptcomplete, STMP3770USBState),
         VMSTATE_UINT32_ARRAY(endptctrl, STMP3770USBState,
-                             STMP3770_USB_NUM_ENDPOINTS),
+                             STMP3770_USB_MIGRATION_ENDPOINTS),
         VMSTATE_UINT32_ARRAY(gptimer, STMP3770USBState, 2),
         VMSTATE_END_OF_LIST()
     }

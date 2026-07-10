@@ -19,7 +19,10 @@
 #define TYPE_STMP3770_USB "stmp3770-usb"
 OBJECT_DECLARE_SIMPLE_TYPE(STMP3770USBState, STMP3770_USB)
 
-#define STMP3770_USB_NUM_ENDPOINTS 8
+#define STMP3770_USB_NUM_ENDPOINTS 5
+
+/* Keep the pre-v3 migration stream layout while exposing only EP0 through EP4. */
+#define STMP3770_USB_MIGRATION_ENDPOINTS 8
 
 struct STMP3770USBState {
     SysBusDevice parent_obj;
@@ -48,7 +51,7 @@ struct STMP3770USBState {
     uint32_t endptflush;
     uint32_t endptstat;
     uint32_t endptcomplete;
-    uint32_t endptctrl[STMP3770_USB_NUM_ENDPOINTS];
+    uint32_t endptctrl[STMP3770_USB_MIGRATION_ENDPOINTS];
 
     uint32_t gptimer[2];
 };

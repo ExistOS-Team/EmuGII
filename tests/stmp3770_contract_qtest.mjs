@@ -1575,6 +1575,48 @@ async function testUsbDeviceControlContract() {
   });
 }
 
+async function testUsbEndpointRegisterContract() {
+  await withMachine(async (machine) => {
+    assert.equal(
+      await machine.readl(USB_BASE + 0x1c0),
+      0x00800080,
+      'USBCTRL ENDPTCTRL0 must reset as the fixed enabled control endpoint',
+    );
+    await machine.writel(USB_BASE + 0x1c0, 0xffffffff);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x1c0),
+      0x008d008d,
+      'USBCTRL ENDPTCTRL0 must retain fixed enables and only Table 318 writable fields',
+    );
+
+    await machine.writel(USB_BASE + 0x1b0, 0xffffffff);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x1b8),
+      0x001f001f,
+      'USBCTRL ENDPTPRIME must expose ready bits only for endpoints 0 through 4',
+    );
+    await machine.writel(USB_BASE + 0x1b4, 0xffffffff);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x1b8),
+      0,
+      'USBCTRL ENDPTFLUSH must clear only documented endpoint ready bits',
+    );
+
+    await machine.writel(USB_BASE + 0x1c4, 0xffffffff);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x1c4),
+      0x00af00af,
+      'USBCTRL ENDPTCTRL1 must preserve only Table 320 writable fields',
+    );
+    await machine.writel(USB_BASE + 0x1d4, 0xffffffff);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x1d4),
+      0,
+      'USBCTRL ENDPTCTRL5 must remain unimplemented because only endpoints 0 through 4 exist',
+    );
+  });
+}
+
 async function testLcdifDataAccessContract() {
   await withMachine(async (machine) => {
     const ctrl = 0x00030001;
@@ -2943,6 +2985,7 @@ const tests = [
   ['USBPHY register contract', testUsbPhyRegisterContract],
   ['USBCTRL capability register contract', testUsbCapabilityRegisterContract],
   ['USBCTRL device control contract', testUsbDeviceControlContract],
+  ['USBCTRL endpoint register contract', testUsbEndpointRegisterContract],
   ['LCDIF data access contract', testLcdifDataAccessContract],
   ['PINCTRL Bank 3 absence', testPinctrlBank3Absent],
   ['ICOLL core contract', testIcollCoreContract],
