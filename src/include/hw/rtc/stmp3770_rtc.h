@@ -45,6 +45,7 @@ struct STMP3770RTCState {
     uint32_t analog_seconds;
     uint32_t analog_alarm;
     uint32_t analog_persistent[STMP3770_RTC_NUM_PERSISTENT];
+    bool analog_initialized;
     uint8_t copy_to_shadow;
     uint8_t copy_to_analog;
 

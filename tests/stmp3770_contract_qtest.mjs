@@ -363,6 +363,47 @@ async function testRtcSuppressCopyToAnalogContract() {
   });
 }
 
+async function testRtcAnalogStateSurvivesChipReset() {
+  await withMachine(async (machine) => {
+    await machine.clockStep(3_000_000);
+    await machine.writel(RTC_BASE + 0x030, 0x12345678);
+    await machine.writel(RTC_BASE + 0x040, 0x87654321);
+    await machine.writel(RTC_BASE + 0x070, 0xdeadbeef);
+    await machine.writel(RTC_BASE + 0x064, 0x00000008);
+    await machine.clockStep(3_000_000);
+
+    await machine.writel(CLKCTRL_BASE + 0x0f0, 0x00000002);
+    await machine.writel(RTC_BASE + 0x030, 0xffffffff);
+    assert.equal(
+      await machine.readl(RTC_BASE + 0x030),
+      0,
+      'RTC LCK_SECS analog state must reject seconds writes before reset shadow refresh completes',
+    );
+    await machine.clockStep(3_000_000);
+
+    assert.equal(
+      await machine.readl(RTC_BASE + 0x030),
+      0x12345678,
+      'RTC SECONDS analog state must survive CLKCTRL RESET.CHIP and refresh the shadow register',
+    );
+    assert.equal(
+      await machine.readl(RTC_BASE + 0x040),
+      0x87654321,
+      'RTC ALARM analog state must survive CLKCTRL RESET.CHIP and refresh the shadow register',
+    );
+    assert.equal(
+      await machine.readl(RTC_BASE + 0x060),
+      0x00000108,
+      'RTC PERSISTENT0 analog state, including LCK_SECS, must survive CLKCTRL RESET.CHIP',
+    );
+    assert.equal(
+      await machine.readl(RTC_BASE + 0x070),
+      0xdeadbeef,
+      'RTC PERSISTENT1 analog state must survive CLKCTRL RESET.CHIP and refresh the shadow register',
+    );
+  });
+}
+
 async function testTimrotTickAndUpdateContract() {
   await withMachine(async (machine) => {
     await machine.writel(TIMROT_BASE + 0x008, 0xc0000000);
@@ -2064,6 +2105,7 @@ const tests = [
   ['RTC watchdog debug contract', testRtcWatchdogDebugContract],
   ['RTC alarm wake contract', testRtcAlarmWakeContract],
   ['RTC suppress copy-to-analog contract', testRtcSuppressCopyToAnalogContract],
+  ['RTC analog state survives chip reset', testRtcAnalogStateSurvivesChipReset],
   ['TIMROT tick and update contract', testTimrotTickAndUpdateContract],
   ['PWM register contract', testPwmRegisterContract],
   ['I2C register contract', testI2cRegisterContract],

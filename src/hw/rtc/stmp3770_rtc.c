@@ -385,7 +385,8 @@ static void stmp3770_rtc_write(void *opaque, hwaddr offset,
         return;
 
     case REG_SECONDS:
-        if (!(s->persistent[0] & PERSISTENT0_LCK_SECS)) {
+        if (!((s->persistent[0] | s->analog_persistent[0]) &
+              PERSISTENT0_LCK_SECS)) {
             stmp3770_rtc_apply_write(&s->seconds, 0xFFFFFFFF, (uint32_t)value,
                                     sct, offset, size);
             stmp3770_rtc_queue_shadow_write(s, 7);
@@ -467,10 +468,13 @@ static void stmp3770_rtc_reset(DeviceState *dev)
     s->watchdog = 0xFFFFFFFF;
     memset(s->persistent, 0, sizeof(s->persistent));
     s->persistent[0] = 0x100; /* MSEC_RES = 1 ms */
-    s->analog_seconds = 0;
-    s->analog_alarm = 0;
-    memset(s->analog_persistent, 0, sizeof(s->analog_persistent));
-    s->analog_persistent[0] = 0x100;
+    if (!s->analog_initialized) {
+        s->analog_seconds = 0;
+        s->analog_alarm = 0;
+        memset(s->analog_persistent, 0, sizeof(s->analog_persistent));
+        s->analog_persistent[0] = 0x100;
+        s->analog_initialized = true;
+    }
     s->copy_to_shadow = 0;
     s->copy_to_analog = 0;
     s->debug = 0;
@@ -519,13 +523,16 @@ static int stmp3770_rtc_post_load(void *opaque, int version_id)
         s->copy_to_shadow = 0;
         s->copy_to_analog = 0;
     }
+    if (version_id < 3) {
+        s->analog_initialized = true;
+    }
     stmp3770_rtc_rearm_copy_timer(s);
     return 0;
 }
 
 static const VMStateDescription vmstate_stmp3770_rtc = {
     .name = TYPE_STMP3770_RTC,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = stmp3770_rtc_post_load,
     .fields = (const VMStateField[]) {
@@ -544,6 +551,7 @@ static const VMStateDescription vmstate_stmp3770_rtc = {
         VMSTATE_UINT32_V(analog_alarm, STMP3770RTCState, 2),
         VMSTATE_UINT32_ARRAY_V(analog_persistent, STMP3770RTCState,
                                STMP3770_RTC_NUM_PERSISTENT, 2),
+        VMSTATE_BOOL_V(analog_initialized, STMP3770RTCState, 3),
         VMSTATE_UINT8_V(copy_to_shadow, STMP3770RTCState, 2),
         VMSTATE_UINT8_V(copy_to_analog, STMP3770RTCState, 2),
         VMSTATE_TIMER_PTR_V(copy_timer, STMP3770RTCState, 2),
