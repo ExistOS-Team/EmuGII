@@ -1333,6 +1333,19 @@ async function testLcdifFifoStatusContract() {
   });
 }
 
+async function testLcdifStreamingEndContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(LCDIF_BASE + 0x008, 0xc0000000);
+    await machine.writel(LCDIF_BASE + 0x000, 0x00910000);
+    await machine.writel(LCDIF_BASE + 0x008, 0x00100000);
+    assert.equal(
+      (await machine.readl(LCDIF_BASE + 0x000)) & 0x00010000,
+      0,
+      'LCDIF ending a bypassed VSYNC stream must clear RUN after its empty FIFO is flushed',
+    );
+  });
+}
+
 async function testLcdifDataAccessContract() {
   await withMachine(async (machine) => {
     const ctrl = 0x00030001;
@@ -2696,6 +2709,7 @@ const tests = [
   ['LCDIF data shift contract', testLcdifDataShiftContract],
   ['LCDIF idle-only control contract', testLcdifIdleOnlyControlContract],
   ['LCDIF FIFO status contract', testLcdifFifoStatusContract],
+  ['LCDIF streaming end contract', testLcdifStreamingEndContract],
   ['LCDIF data access contract', testLcdifDataAccessContract],
   ['PINCTRL Bank 3 absence', testPinctrlBank3Absent],
   ['ICOLL core contract', testIcollCoreContract],
