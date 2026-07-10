@@ -75,6 +75,11 @@ static void stmp3770_ssp_complete_data_word(STMP3770SSPState *s)
     }
 }
 
+static bool stmp3770_ssp_has_sct_alias(hwaddr offset)
+{
+    return offset == SSP_CTRL0 || offset == SSP_CMD0 || offset == SSP_CTRL1;
+}
+
 static void stmp3770_ssp_reset(DeviceState *dev)
 {
     STMP3770SSPState *s = STMP3770_SSP(dev);
@@ -101,6 +106,7 @@ static void stmp3770_ssp_reset(DeviceState *dev)
 static uint64_t stmp3770_ssp_read(void *opaque, hwaddr offset, unsigned size)
 {
     STMP3770SSPState *s = STMP3770_SSP(opaque);
+    hwaddr reg = offset & ~0xFULL;
 
     if (size != 4) {
         qemu_log_mask(LOG_GUEST_ERROR,
@@ -109,7 +115,11 @@ static uint64_t stmp3770_ssp_read(void *opaque, hwaddr offset, unsigned size)
         return 0;
     }
 
-    switch (offset & ~0xFULL) {
+    if ((offset & 0xFULL) && stmp3770_ssp_has_sct_alias(reg)) {
+        return 0;
+    }
+
+    switch (offset) {
     case SSP_CTRL0:
         return s->ctrl0;
     case SSP_CTRL1:
@@ -162,6 +172,7 @@ static void stmp3770_ssp_write(void *opaque, hwaddr offset,
 {
     STMP3770SSPState *s = STMP3770_SSP(opaque);
     int sct = offset & 0xF;
+    hwaddr reg = offset & ~0xFULL;
 
     if (size != 4) {
         qemu_log_mask(LOG_GUEST_ERROR,
@@ -170,9 +181,14 @@ static void stmp3770_ssp_write(void *opaque, hwaddr offset,
         return;
     }
 
-    offset &= ~0xFULL;
+    if (sct && !stmp3770_ssp_has_sct_alias(reg)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "stmp3770-ssp: register has no SCT alias at "
+                      HWADDR_FMT_plx "\n", offset);
+        return;
+    }
 
-    switch (offset) {
+    switch (reg) {
     case SSP_CTRL0:
     {
         uint32_t old_ctrl0 = s->ctrl0;
@@ -195,6 +211,7 @@ static void stmp3770_ssp_write(void *opaque, hwaddr offset,
         break;
     case SSP_CMD0:
         stmp3770_ssp_apply_sct(&s->cmd0, (uint32_t)value, sct);
+        s->cmd0 &= SSP_CMD0_WRITABLE_MASK;
         break;
     case SSP_CMD1:
         stmp3770_ssp_apply_sct(&s->cmd1, (uint32_t)value, sct);

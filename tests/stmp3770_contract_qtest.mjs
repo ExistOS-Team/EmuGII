@@ -1859,6 +1859,53 @@ async function testSspCtrl1WritableMaskContract() {
   });
 }
 
+async function testSspSctAndCmd0ReservedContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(SSP1_BASE + 0x010, 0xffe12345);
+    assert.equal(
+      await machine.readl(SSP1_BASE + 0x010),
+      0x00012345,
+      'SSP CMD0 must retain only documented bits 20:0',
+    );
+
+    await machine.writel(SSP1_BASE + 0x014, 0x00100000);
+    assert.equal(
+      await machine.readl(SSP1_BASE + 0x014),
+      0,
+      'SSP CMD0_SET must read as a write-only SCT alias',
+    );
+    assert.equal(
+      await machine.readl(SSP1_BASE + 0x010),
+      0x00112345,
+      'SSP CMD0_SET must update documented CMD0 bits',
+    );
+
+    await machine.writel(SSP1_BASE + 0x020, 0x11223344);
+    await machine.writel(SSP1_BASE + 0x024, 0xaabbccdd);
+    assert.equal(
+      await machine.readl(SSP1_BASE + 0x024),
+      0,
+      'SSP CMD1 must not decode an undocumented SCT alias',
+    );
+    assert.equal(
+      await machine.readl(SSP1_BASE + 0x020),
+      0x11223344,
+      'SSP CMD1 must ignore an undocumented SCT alias write',
+    );
+
+    assert.equal(
+      await machine.readl(SSP1_BASE + 0x004),
+      0,
+      'SSP CTRL0_SET must read as a write-only SCT alias',
+    );
+    assert.equal(
+      await machine.readl(SSP1_BASE + 0x064),
+      0,
+      'SSP CTRL1_SET must read as a write-only SCT alias',
+    );
+  });
+}
+
 async function testSspErrorIrqPairingContract() {
   await withMachine(async (machine) => {
     const errorPairs = [
@@ -3750,6 +3797,7 @@ const tests = [
   ['SSP register layout and reset contract', testSspRegisterLayoutAndResetContract],
   ['SSP soft reset and clock gate contract', testSspSoftResetAndClockGateContract],
   ['SSP CTRL1 writable mask contract', testSspCtrl1WritableMaskContract],
+  ['SSP SCT and CMD0 reserved contract', testSspSctAndCmd0ReservedContract],
   ['SSP error IRQ pairing contract', testSspErrorIrqPairingContract],
   ['SSP DATA empty read contract', testSspDataEmptyReadContract],
   ['on-chip ROM and SRAM mirror contract', testOnChipRomAndSramMirrorContract],
