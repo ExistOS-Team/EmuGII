@@ -106,6 +106,54 @@ static const MemoryRegionOps stmp3770_dflpt_ops = {
     .valid.max_access_size = 4,
 };
 
+static MemTxResult stmp3770_sram_mirror_read(void *opaque, hwaddr addr,
+                                              uint64_t *data, unsigned size,
+                                              MemTxAttrs attrs)
+{
+    STMP3770State *s = opaque;
+    uint8_t *ram = memory_region_get_ram_ptr(&s->sram);
+    hwaddr offset = addr % STMP3770_SRAM_SIZE;
+    unsigned i;
+
+    (void)attrs;
+    *data = 0;
+    for (i = 0; i < size; i++) {
+        *data |= (uint64_t)ram[(offset + i) % STMP3770_SRAM_SIZE] << (i * 8);
+    }
+
+    return MEMTX_OK;
+}
+
+static MemTxResult stmp3770_sram_mirror_write(void *opaque, hwaddr addr,
+                                               uint64_t data, unsigned size,
+                                               MemTxAttrs attrs)
+{
+    STMP3770State *s = opaque;
+    uint8_t *ram = memory_region_get_ram_ptr(&s->sram);
+    hwaddr offset = addr % STMP3770_SRAM_SIZE;
+    hwaddr first_chunk = MIN((hwaddr)size, STMP3770_SRAM_SIZE - offset);
+    unsigned i;
+
+    (void)attrs;
+    for (i = 0; i < size; i++) {
+        ram[(offset + i) % STMP3770_SRAM_SIZE] = data >> (i * 8);
+    }
+    memory_region_set_dirty(&s->sram, offset, first_chunk);
+    if (first_chunk < size) {
+        memory_region_set_dirty(&s->sram, 0, size - first_chunk);
+    }
+
+    return MEMTX_OK;
+}
+
+static const MemoryRegionOps stmp3770_sram_mirror_ops = {
+    .read_with_attrs = stmp3770_sram_mirror_read,
+    .write_with_attrs = stmp3770_sram_mirror_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+    .valid.min_access_size = 1,
+    .valid.max_access_size = 4,
+};
+
 static void stmp3770_reset(DeviceState *dev)
 {
     STMP3770State *s = STMP3770(dev);
@@ -151,6 +199,8 @@ static void stmp3770_init(Object *obj)
 
     /* Initialize ARM926EJ-S CPU */
     object_initialize_child(obj, "cpu", &s->cpu, ARM_CPU_TYPE_NAME("arm926"));
+    object_property_set_bool(OBJECT(&s->cpu), "reset-hivecs", true,
+                             &error_abort);
 
     /* Initialize interrupt controller (ICOLL) */
     s->icoll = STMP3770_ICOLL(object_new(TYPE_STMP3770_ICOLL));
@@ -286,6 +336,18 @@ static void stmp3770_realize(DeviceState *dev, Error **errp)
         return;
     }
     memory_region_add_subregion(system_memory, STMP3770_SRAM_ADDR, &s->sram);
+
+    memory_region_init_io(&s->sram_mirror, OBJECT(dev),
+                          &stmp3770_sram_mirror_ops, s,
+                          "stmp3770.sram-mirror", STMP3770_SRAM_MIRROR_SIZE);
+    memory_region_add_subregion_overlap(system_memory, STMP3770_SRAM_ADDR,
+                                        &s->sram_mirror, -1);
+
+    if (!memory_region_init_rom(&s->rom, OBJECT(dev), "stmp3770.rom",
+                                STMP3770_ROM_SIZE, errp)) {
+        return;
+    }
+    memory_region_add_subregion(system_memory, STMP3770_ROM_ADDR, &s->rom);
 
     /*
      * STMP37xx exposes a sparse hardware first-level page-table window:

@@ -125,6 +125,8 @@ struct STMP3770State {
 
     /* Memory regions */
     MemoryRegion sram;          /* 512KB on-chip SRAM */
+    MemoryRegion sram_mirror;   /* OCRAM aliases through 0x3fffffff */
+    MemoryRegion rom;           /* 64KB on-chip boot ROM */
     MemoryRegion dflpt;         /* Hardware L1 page-table window */
     uint32_t dflpt_mpte[8];     /* Movable page-table entry payloads */
     uint32_t dflpt_pte_2048;    /* Semi-programmable fixed PTE */
@@ -235,6 +237,11 @@ struct STMP3770State {
 /* On-chip SRAM - 512KB */
 #define STMP3770_SRAM_ADDR          0x00000000
 #define STMP3770_SRAM_SIZE          0x80000     /* 512KB */
+#define STMP3770_SRAM_MIRROR_SIZE   0x40000000
+
+/* On-chip mask-programmable boot ROM - 64KB */
+#define STMP3770_ROM_ADDR           0xFFFF0000
+#define STMP3770_ROM_SIZE           0x10000
 
 /* Hardware DFLPT first-level page-table RAM */
 #define STMP3770_DFLPT_ADDR         0x800C0000

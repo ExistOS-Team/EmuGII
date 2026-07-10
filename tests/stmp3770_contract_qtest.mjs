@@ -34,6 +34,8 @@ const SSP2_BASE = 0x80034000;
 const APBX_BASE = 0x80024000;
 const APPUART_BASE = 0x8006c000;
 const DBGUART_BASE = 0x80070000;
+const SRAM_BASE = 0x00000000;
+const OCROM_BASE = 0xffff0000;
 
 class QTestMachine {
   constructor(port) {
@@ -1876,6 +1878,41 @@ async function testSspDataEmptyReadContract() {
   });
 }
 
+async function testOnChipRomAndSramMirrorContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(SRAM_BASE + 0x1234, 0x11223344);
+    assert.equal(
+      await machine.readl(0x00081234),
+      0x11223344,
+      'STMP3770 OCRAM must mirror every 512 KiB across the documented low 1 GiB window',
+    );
+    assert.equal(
+      await machine.readl(0x3ff81234),
+      0x11223344,
+      'STMP3770 OCRAM last low-window mirror must alias physical OCRAM',
+    );
+
+    await machine.writel(0x3ff81234, 0xaabbccdd);
+    assert.equal(
+      await machine.readl(SRAM_BASE + 0x1234),
+      0xaabbccdd,
+      'writes through an OCRAM mirror must update the base OCRAM instance',
+    );
+
+    assert.equal(
+      await machine.readl(OCROM_BASE),
+      0,
+      'STMP3770 OCROM reset vector storage must be mapped at 0xffff0000',
+    );
+    await machine.writel(OCROM_BASE, 0xdeadbeef);
+    assert.equal(
+      await machine.readl(OCROM_BASE),
+      0,
+      'STMP3770 OCROM must remain read-only to CPU writes',
+    );
+  });
+}
+
 async function testDcpRegisterAndMemcopyContract() {
   await withMachine(async (machine) => {
     assert.equal(
@@ -3659,6 +3696,7 @@ const tests = [
   ['SSP soft reset and clock gate contract', testSspSoftResetAndClockGateContract],
   ['SSP CTRL1 writable mask contract', testSspCtrl1WritableMaskContract],
   ['SSP DATA empty read contract', testSspDataEmptyReadContract],
+  ['on-chip ROM and SRAM mirror contract', testOnChipRomAndSramMirrorContract],
   ['DCP register and memcopy contract', testDcpRegisterAndMemcopyContract],
   ['DCP channel register map contract', testDcpChannelRegisterMapContract],
   ['DCP key and context register contract', testDcpKeyAndContextRegisterContract],
