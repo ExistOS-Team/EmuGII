@@ -44,7 +44,17 @@ struct STMP3770TimerState {
     /* Rotary decoder */
     uint32_t rotctrl;
     uint32_t rotcount;
+    ptimer_state *rotary_tick;
     uint8_t pwm_input[STMP3770_TIMER_NUM_PWM_INPUTS];
+    uint8_t rotary_state;
+    uint8_t rotary_stable_a;
+    uint8_t rotary_stable_b;
+    uint8_t rotary_candidate_a;
+    uint8_t rotary_candidate_b;
+    uint8_t rotary_samples_a;
+    uint8_t rotary_samples_b;
+    bool rotary_initialized;
+    bool rotary_error;
     uint16_t duty_running_count;
     uint16_t duty_low_count;
     uint16_t duty_high_count;

@@ -47,6 +47,8 @@
 #define ROTCTRL_TIM1_PRESENT        (1U << 26)
 #define ROTCTRL_TIM0_PRESENT        (1U << 25)
 #define ROTCTRL_PRESENT_MASK        (0x1FU << 25)
+#define ROTCTRL_STATE_SHIFT         22
+#define ROTCTRL_STATE_MASK          0x7
 #define ROTCTRL_RELATIVE            (1U << 12)
 #define ROTCTRL_OVERSAMPLE_SHIFT    10
 #define ROTCTRL_OVERSAMPLE_MASK     0x3
@@ -100,9 +102,12 @@
 
 /* APBX clock frequency used for TICK_ALWAYS / PWM sources */
 #define STMP3770_TIMROT_APB_FREQ    24000000
+#define STMP3770_TIMROT_ROTARY_FREQ 32768
 
 static void stmp3770_timer_reset(DeviceState *dev);
 static int stmp3770_timer_post_load(void *opaque, int version_id);
+static void stmp3770_timer_rearm_rotary(STMP3770TimerState *s,
+                                        bool reset_sampling);
 
 static bool stmp3770_timer_is_duty_cycle(const STMP3770TimerChannel *t,
                                          int idx)
@@ -118,6 +123,152 @@ static void stmp3770_timer_reset_duty_cycle(STMP3770TimerState *s)
     s->duty_high_count = 0;
     s->duty_have_high = false;
     s->test_signal_seen = false;
+}
+
+static bool stmp3770_timer_rotary_input(const STMP3770TimerState *s,
+                                        unsigned int select, bool polarity)
+{
+    bool level = false;
+
+    if (select >= TIMCLK_PWM0 && select <= TIMCLK_PWM4) {
+        level = s->pwm_input[select - TIMCLK_PWM0];
+    }
+    return level ^ polarity;
+}
+
+static unsigned int stmp3770_timer_rotary_samples_required(
+    const STMP3770TimerState *s)
+{
+    unsigned int oversample = (s->rotctrl >> ROTCTRL_OVERSAMPLE_SHIFT) &
+                              ROTCTRL_OVERSAMPLE_MASK;
+
+    return 1U << (3 - oversample);
+}
+
+static bool stmp3770_timer_rotary_debounce(bool input, uint8_t *stable,
+                                           uint8_t *candidate,
+                                           uint8_t *samples,
+                                           unsigned int required)
+{
+    if (input == *stable) {
+        *candidate = input;
+        *samples = 0;
+        return false;
+    }
+    if (input != *candidate) {
+        *candidate = input;
+        *samples = 1;
+    } else {
+        (*samples)++;
+    }
+    if (*samples < required) {
+        return false;
+    }
+
+    *stable = input;
+    *samples = 0;
+    return true;
+}
+
+static void stmp3770_timer_rotary_transition(STMP3770TimerState *s,
+                                             uint8_t input)
+{
+    uint8_t state = s->rotary_state;
+
+    if (input == state) {
+        return;
+    }
+    if (s->rotary_error) {
+        if (input == 0) {
+            s->rotary_error = false;
+        }
+        s->rotary_state = input;
+        return;
+    }
+    if ((state ^ input) != 1 && (state ^ input) != 2) {
+        s->rotary_state = input;
+        s->rotary_error = true;
+        return;
+    }
+
+    s->rotary_state = input;
+    if (input != 0) {
+        return;
+    }
+    if (state == 1) {
+        s->rotcount = (s->rotcount - 1) & 0xFFFF;
+    } else if (state == 2) {
+        s->rotcount = (s->rotcount + 1) & 0xFFFF;
+    }
+}
+
+static void stmp3770_timer_rotary_tick(void *opaque)
+{
+    STMP3770TimerState *s = opaque;
+    unsigned int select_a = (s->rotctrl >> ROTCTRL_SELECT_A_SHIFT) &
+                            ROTCTRL_SELECT_A_MASK;
+    unsigned int select_b = (s->rotctrl >> ROTCTRL_SELECT_B_SHIFT) &
+                            ROTCTRL_SELECT_B_MASK;
+    unsigned int required = stmp3770_timer_rotary_samples_required(s);
+    bool input_a;
+    bool input_b;
+
+    if (s->rotctrl & (ROTCTRL_SFTRST | ROTCTRL_CLKGATE)) {
+        return;
+    }
+
+    input_a = stmp3770_timer_rotary_input(
+        s, select_a, s->rotctrl & ROTCTRL_POLARITY_A);
+    input_b = stmp3770_timer_rotary_input(
+        s, select_b, s->rotctrl & ROTCTRL_POLARITY_B);
+
+    if (!s->rotary_initialized) {
+        s->rotary_stable_a = input_a;
+        s->rotary_stable_b = input_b;
+        s->rotary_candidate_a = input_a;
+        s->rotary_candidate_b = input_b;
+        s->rotary_state = (input_b << 1) | input_a;
+        s->rotary_initialized = true;
+        return;
+    }
+
+    bool changed_a = stmp3770_timer_rotary_debounce(
+        input_a, &s->rotary_stable_a, &s->rotary_candidate_a,
+        &s->rotary_samples_a, required);
+    bool changed_b = stmp3770_timer_rotary_debounce(
+        input_b, &s->rotary_stable_b, &s->rotary_candidate_b,
+        &s->rotary_samples_b, required);
+
+    if (changed_a || changed_b) {
+        stmp3770_timer_rotary_transition(s,
+                                         (s->rotary_stable_b << 1) |
+                                         s->rotary_stable_a);
+    }
+}
+
+static void stmp3770_timer_rearm_rotary(STMP3770TimerState *s,
+                                        bool reset_sampling)
+{
+    unsigned int divider = (s->rotctrl >> ROTCTRL_DIVIDER_SHIFT) &
+                           ROTCTRL_DIVIDER_MASK;
+
+    ptimer_transaction_begin(s->rotary_tick);
+    ptimer_stop(s->rotary_tick);
+    if (s->rotctrl & (ROTCTRL_SFTRST | ROTCTRL_CLKGATE)) {
+        ptimer_transaction_commit(s->rotary_tick);
+        return;
+    }
+
+    if (reset_sampling) {
+        s->rotary_initialized = false;
+        s->rotary_error = false;
+        s->rotary_samples_a = 0;
+        s->rotary_samples_b = 0;
+    }
+    ptimer_set_freq(s->rotary_tick, STMP3770_TIMROT_ROTARY_FREQ);
+    ptimer_set_limit(s->rotary_tick, divider + 1, 1);
+    ptimer_run(s->rotary_tick, 0);
+    ptimer_transaction_commit(s->rotary_tick);
 }
 
 static inline int timctrl_idx_from_base(hwaddr base)
@@ -321,10 +472,19 @@ static uint64_t stmp3770_timer_read(void *opaque, hwaddr offset, unsigned size)
 
     switch (base) {
     case REG_ROTCTRL:
-        return s->rotctrl | ROTCTRL_PRESENT_MASK;
+        return (s->rotctrl & ~(ROTCTRL_STATE_MASK << ROTCTRL_STATE_SHIFT)) |
+               ROTCTRL_PRESENT_MASK |
+               ((uint32_t)s->rotary_state << ROTCTRL_STATE_SHIFT);
 
     case REG_ROTCOUNT:
-        return s->rotcount;
+        {
+            uint32_t count = s->rotcount & 0xFFFF;
+
+            if (s->rotctrl & ROTCTRL_RELATIVE) {
+                s->rotcount = 0;
+            }
+            return count;
+        }
 
     case REG_VERSION:
         return s->version;
@@ -390,6 +550,16 @@ static void stmp3770_timer_write_rotctrl(STMP3770TimerState *s,
         for (i = 0; i < STMP3770_NUM_TIMERS; i++) {
             stmp3770_timer_configure(s, i, false);
         }
+    }
+    if ((old ^ s->rotctrl) & (ROTCTRL_CLKGATE | ROTCTRL_SELECT_A_MASK |
+                               (ROTCTRL_SELECT_B_MASK <<
+                                ROTCTRL_SELECT_B_SHIFT) |
+                               ROTCTRL_POLARITY_A | ROTCTRL_POLARITY_B |
+                               (ROTCTRL_OVERSAMPLE_MASK <<
+                                ROTCTRL_OVERSAMPLE_SHIFT) |
+                               (ROTCTRL_DIVIDER_MASK <<
+                                ROTCTRL_DIVIDER_SHIFT))) {
+        stmp3770_timer_rearm_rotary(s, true);
     }
 }
 
@@ -515,6 +685,19 @@ static void stmp3770_timer_reset(DeviceState *dev)
 
     s->rotctrl = ROTCTRL_SFTRST | ROTCTRL_CLKGATE | ROTCTRL_PRESENT_MASK;
     s->rotcount = 0;
+    s->rotary_state = 0;
+    s->rotary_stable_a = 0;
+    s->rotary_stable_b = 0;
+    s->rotary_candidate_a = 0;
+    s->rotary_candidate_b = 0;
+    s->rotary_samples_a = 0;
+    s->rotary_samples_b = 0;
+    s->rotary_initialized = false;
+    s->rotary_error = false;
+    ptimer_transaction_begin(s->rotary_tick);
+    ptimer_stop(s->rotary_tick);
+    ptimer_set_limit(s->rotary_tick, 1, 1);
+    ptimer_transaction_commit(s->rotary_tick);
 
     for (i = 0; i < STMP3770_NUM_TIMERS; i++) {
         STMP3770TimerChannel *t = &s->timer[i];
@@ -548,6 +731,9 @@ static void stmp3770_timer_init(Object *obj)
         &s->iomem, obj, &stmp3770_timer_ops, s,
         TYPE_STMP3770_TIMER, 0x2000);
     sysbus_init_mmio(sbd, &s->iomem);
+    s->rotary_tick = ptimer_init(stmp3770_timer_rotary_tick, s,
+                                 PTIMER_POLICY_NO_COUNTER_ROUND_DOWN |
+                                 PTIMER_POLICY_TRIGGER_ONLY_ON_DECREMENT);
 
     for (i = 0; i < STMP3770_NUM_TIMERS; i++) {
         sysbus_init_irq(sbd, &s->irq[i]);
@@ -581,9 +767,25 @@ static const VMStateDescription vmstate_stmp3770_timer_channel = {
     }
 };
 
+static bool stmp3770_timer_rotary_needed(void *opaque)
+{
+    return true;
+}
+
+static const VMStateDescription vmstate_stmp3770_timer_rotary = {
+    .name = "stmp3770-timer/rotary",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = stmp3770_timer_rotary_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_PTIMER(rotary_tick, STMP3770TimerState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_stmp3770_timer = {
     .name = TYPE_STMP3770_TIMER,
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = stmp3770_timer_post_load,
     .fields = (const VMStateField[]) {
@@ -597,11 +799,24 @@ static const VMStateDescription vmstate_stmp3770_timer = {
         VMSTATE_BOOL_V(duty_have_high, STMP3770TimerState, 2),
         VMSTATE_BOOL_V(test_signal_level, STMP3770TimerState, 2),
         VMSTATE_BOOL_V(test_signal_seen, STMP3770TimerState, 2),
+        VMSTATE_UINT8_V(rotary_state, STMP3770TimerState, 3),
+        VMSTATE_UINT8_V(rotary_stable_a, STMP3770TimerState, 3),
+        VMSTATE_UINT8_V(rotary_stable_b, STMP3770TimerState, 3),
+        VMSTATE_UINT8_V(rotary_candidate_a, STMP3770TimerState, 3),
+        VMSTATE_UINT8_V(rotary_candidate_b, STMP3770TimerState, 3),
+        VMSTATE_UINT8_V(rotary_samples_a, STMP3770TimerState, 3),
+        VMSTATE_UINT8_V(rotary_samples_b, STMP3770TimerState, 3),
+        VMSTATE_BOOL_V(rotary_initialized, STMP3770TimerState, 3),
+        VMSTATE_BOOL_V(rotary_error, STMP3770TimerState, 3),
         VMSTATE_UINT32(version, STMP3770TimerState),
         VMSTATE_STRUCT_ARRAY(timer, STMP3770TimerState, STMP3770_NUM_TIMERS,
                              0, vmstate_stmp3770_timer_channel,
                              STMP3770TimerChannel),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_stmp3770_timer_rotary,
+        NULL
     }
 };
 
@@ -617,6 +832,18 @@ static int stmp3770_timer_post_load(void *opaque, int version_id)
         s->duty_have_high = false;
         s->test_signal_level = false;
         s->test_signal_seen = false;
+    }
+    if (version_id < 3) {
+        s->rotary_state = 0;
+        s->rotary_stable_a = 0;
+        s->rotary_stable_b = 0;
+        s->rotary_candidate_a = 0;
+        s->rotary_candidate_b = 0;
+        s->rotary_samples_a = 0;
+        s->rotary_samples_b = 0;
+        s->rotary_initialized = false;
+        s->rotary_error = false;
+        stmp3770_timer_rearm_rotary(s, true);
     }
     return 0;
 }

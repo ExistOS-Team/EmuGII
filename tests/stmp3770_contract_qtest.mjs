@@ -541,6 +541,73 @@ async function testTimrotDutyCycleContract() {
   });
 }
 
+async function testTimrotRotaryContract() {
+  await withMachine(async (machine) => {
+    const pwmActive = 0x27100000;
+    const pwmPeriod = 0x000b4e20;
+
+    await machine.writel(TIMROT_BASE + 0x000, 0x00000c32);
+    await machine.writel(PWM_BASE + 0x008, 0xc0000000);
+    await machine.writel(PWM_BASE + 0x030, pwmActive);
+    await machine.writel(PWM_BASE + 0x040, pwmPeriod);
+    await machine.writel(PWM_BASE + 0x050, pwmActive);
+    await machine.writel(PWM_BASE + 0x060, pwmPeriod);
+
+    await machine.writel(PWM_BASE + 0x004, 0x00000002);
+    await machine.clockStep(208_000);
+    await machine.writel(PWM_BASE + 0x004, 0x00000004);
+    await machine.clockStep(5_000_000);
+
+    const absoluteCount = await machine.readl(TIMROT_BASE + 0x010);
+    assert.equal(
+      absoluteCount >>> 16,
+      0,
+      'TIMROT ROTCOUNT must keep its reserved upper half clear',
+    );
+    assert.notEqual(
+      absoluteCount & 0xffff,
+      0,
+      'TIMROT rotary decoder must count legal PWM1/PWM2 quadrature transitions',
+    );
+
+    await machine.writel(TIMROT_BASE + 0x004, 0x00001000);
+    const relativeCount = await machine.readl(TIMROT_BASE + 0x010);
+    assert.notEqual(
+      relativeCount & 0xffff,
+      0,
+      'TIMROT relative ROTCOUNT read must report the accumulated signed count',
+    );
+    assert.equal(
+      await machine.readl(TIMROT_BASE + 0x010),
+      0,
+      'TIMROT relative ROTCOUNT read must clear the counter as a side effect',
+    );
+  });
+}
+
+async function testTimrotRotaryInvalidTransitionContract() {
+  await withMachine(async (machine) => {
+    const pwmActive = 0x27100000;
+    const pwmPeriod = 0x000b4e20;
+
+    await machine.writel(TIMROT_BASE + 0x000, 0x00000c32);
+    await machine.writel(PWM_BASE + 0x008, 0xc0000000);
+    await machine.writel(PWM_BASE + 0x030, pwmActive);
+    await machine.writel(PWM_BASE + 0x040, pwmPeriod);
+    await machine.writel(PWM_BASE + 0x050, pwmActive);
+    await machine.writel(PWM_BASE + 0x060, pwmPeriod);
+
+    await machine.writel(PWM_BASE + 0x004, 0x00000006);
+    await machine.clockStep(2_000_000);
+
+    assert.equal(
+      await machine.readl(TIMROT_BASE + 0x010),
+      0,
+      'TIMROT rotary decoder must ignore invalid direct BA=00 to BA=11 transitions',
+    );
+  });
+}
+
 async function testPwmRegisterContract() {
   await withMachine(async (machine) => {
     assert.equal(
@@ -2352,6 +2419,8 @@ const tests = [
   ['RTC millisecond resolution contract', testRtcMsecResolutionContract],
   ['TIMROT tick and update contract', testTimrotTickAndUpdateContract],
   ['TIMROT duty-cycle contract', testTimrotDutyCycleContract],
+  ['TIMROT rotary contract', testTimrotRotaryContract],
+  ['TIMROT rotary invalid transition contract', testTimrotRotaryInvalidTransitionContract],
   ['PWM register contract', testPwmRegisterContract],
   ['PWM waveform contract', testPwmWaveformContract],
   ['PWM MATT contract', testPwmMattContract],
