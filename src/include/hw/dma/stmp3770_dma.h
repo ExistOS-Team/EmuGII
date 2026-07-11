@@ -72,6 +72,16 @@ typedef struct STMP3770DMAChannel {
     uint32_t loaded_bar;
     uint32_t pio_words[15];
     unsigned int num_pio_words;
+
+    /*
+     * WAIT4ENDCMD pending state.  wait4endcmd_pending is set when a command
+     * with WAIT4ENDCMD has been loaded and the DMA is waiting for the
+     * peripheral completion callback.  wait4endcmd_completion is set when
+     * the completion callback arrives but the channel is not active (frozen,
+     * clock-gated or reset) so the completion cannot be processed immediately.
+     */
+    bool wait4endcmd_pending;
+    bool wait4endcmd_completion;
 } STMP3770DMAChannel;
 
 struct STMP3770DMAState {

@@ -175,6 +175,8 @@ static void stmp3770_dma_reset_channel(STMP3770DMAState *s, int ch_idx)
     ch->loaded_cmd = 0;
     ch->loaded_bar = 0;
     ch->num_pio_words = 0;
+    ch->wait4endcmd_pending = false;
+    ch->wait4endcmd_completion = false;
 }
 
 static void stmp3770_dma_kick_channel(STMP3770DMAState *s, int ch_idx);
@@ -287,6 +289,12 @@ static bool stmp3770_dma_load_command(STMP3770DMAState *s, int ch_idx)
     ch->curcmdar = addr;
     ch->cmd = ch->loaded_cmd;
     ch->bar = ch->loaded_bar;
+
+    /*
+     * A newly loaded descriptor cannot be carrying stale WAIT4ENDCMD state.
+     */
+    ch->wait4endcmd_pending = false;
+    ch->wait4endcmd_completion = false;
 
     /*
      * CHn_DEBUG2 exposes the number of APB and AHB bytes remaining in the
@@ -486,6 +494,8 @@ static void stmp3770_dma_run_channel(STMP3770DMAState *s, int ch_idx)
     }
 
     if (wait4endcmd && s->completion_cb[ch_idx]) {
+        ch->wait4endcmd_pending = true;
+        ch->wait4endcmd_completion = false;
         s->completion_cb[ch_idx](s, ch_idx, s->completion_opaque[ch_idx]);
         return;
     }
@@ -530,11 +540,23 @@ void stmp3770_dma_complete_channel_command(STMP3770DMAState *s, int ch_idx)
     if (!s || ch_idx < 0 || ch_idx >= STMP3770_DMA_NUM_CHANNELS) {
         return;
     }
+
+    ch = &s->ch[ch_idx];
+
     if (!stmp3770_dma_channel_active(s, ch_idx)) {
+        if (ch->wait4endcmd_pending) {
+            ch->wait4endcmd_completion = true;
+        }
         return;
     }
 
-    ch = &s->ch[ch_idx];
+    if (ch->wait4endcmd_pending) {
+        ch->wait4endcmd_pending = false;
+        ch->wait4endcmd_completion = false;
+    } else {
+        return;
+    }
+
     ch->debug2 = 0;
 
     cmd = ch->loaded_cmd;
@@ -566,6 +588,18 @@ static void stmp3770_dma_kick_channel(STMP3770DMAState *s, int ch_idx)
     uint32_t phore;
 
     if (!stmp3770_dma_channel_active(s, ch_idx)) {
+        return;
+    }
+
+    /*
+     * If a WAIT4ENDCMD completion was deferred while the channel was frozen,
+     * clock-gated or reset, finish it now.  If the WAIT4ENDCMD is still
+     * pending but no completion has arrived yet, do nothing.
+     */
+    if (ch->wait4endcmd_pending) {
+        if (ch->wait4endcmd_completion) {
+            stmp3770_dma_complete_channel_command(s, ch_idx);
+        }
         return;
     }
 
@@ -838,10 +872,22 @@ static void stmp3770_dma_init(Object *obj)
     }
 }
 
+static int stmp3770_dma_channel_post_load(void *opaque, int version_id)
+{
+    STMP3770DMAChannel *ch = opaque;
+
+    if (version_id < 2) {
+        ch->wait4endcmd_pending = false;
+        ch->wait4endcmd_completion = false;
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_stmp3770_dma_channel = {
     .name = "stmp3770-dma-channel",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
+    .post_load = stmp3770_dma_channel_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(curcmdar, STMP3770DMAChannel),
         VMSTATE_UINT32(nxtcmdar, STMP3770DMAChannel),
@@ -855,6 +901,8 @@ static const VMStateDescription vmstate_stmp3770_dma_channel = {
         VMSTATE_UINT32(loaded_bar, STMP3770DMAChannel),
         VMSTATE_UINT32_ARRAY(pio_words, STMP3770DMAChannel, 15),
         VMSTATE_UINT32(num_pio_words, STMP3770DMAChannel),
+        VMSTATE_BOOL_V(wait4endcmd_pending, STMP3770DMAChannel, 2),
+        VMSTATE_BOOL_V(wait4endcmd_completion, STMP3770DMAChannel, 2),
         VMSTATE_END_OF_LIST()
     }
 };

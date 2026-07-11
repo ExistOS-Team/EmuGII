@@ -3257,6 +3257,239 @@ async function testApbhDmaDebug2RemainingByteContract() {
   });
 }
 
+async function testApbhDmaWait4endcmdFreezeClkgateResetContract() {
+  await withMachine(async (machine) => {
+    const apbhChannel4CurrentCommand = APBH_BASE + 0x200;
+    const apbhChannel4NextCommand = APBH_BASE + 0x210;
+    const apbhChannel4Semaphore = APBH_BASE + 0x240;
+    const apbhChannel4Debug2 = APBH_BASE + 0x260;
+    const waitDescriptor = SRAM_BASE + 0x3300;
+    const doneDescriptor = SRAM_BASE + 0x3340;
+    const waitDescriptor2 = SRAM_BASE + 0x3380;
+    const doneDescriptor2 = SRAM_BASE + 0x33c0;
+    const waitDescriptor3 = SRAM_BASE + 0x3400;
+    const doneDescriptor3 = SRAM_BASE + 0x3440;
+    const bar = SRAM_BASE + 0x00011000;
+    const bar2 = SRAM_BASE + 0x00012000;
+    const bar3 = SRAM_BASE + 0x00013000;
+    const commandWaitForReady = 3 << 24;
+    const wordLength8Bit = 1 << 23;
+    const runBit = 1 << 29;
+    const chainBit = 1 << 2;
+    const irqOnCompleteBit = 1 << 3;
+    const semaphoreBit = 1 << 6;
+    const wait4EndCmdBit = 1 << 7;
+    const onePioWord = 1 << 12;
+    const dmaWrite = 1;
+    const dmaTerminal = semaphoreBit | irqOnCompleteBit;
+    const xferCount = 512;
+    const expectedDebug2 = (xferCount << 16) | 0;
+
+    const writeDescriptor = async (address, next, command, bar, ctrl0 = undefined) => {
+      await machine.writel(address + 0x00, next);
+      await machine.writel(address + 0x04, command);
+      await machine.writel(address + 0x08, bar);
+      if (ctrl0 !== undefined) {
+        await machine.writel(address + 0x0c, ctrl0);
+      }
+    };
+
+    const waitCtrl0 = runBit | commandWaitForReady | wordLength8Bit;
+    const waitCommand = (xferCount << 16) |
+                        onePioWord | wait4EndCmdBit | chainBit | dmaWrite;
+
+    const startWait4endcmd = async (nxt, waitDesc, doneDesc, buffer, useBar) => {
+      await writeDescriptor(waitDesc, doneDesc, waitCommand, useBar, waitCtrl0);
+      await writeDescriptor(doneDesc, 0, dmaTerminal, 0);
+      await machine.writel(nxt, waitDesc);
+      await machine.writel(apbhChannel4Semaphore, 1);
+    };
+
+    await machine.writel(CLKCTRL_BASE + 0x080, 0x00000001);
+    await machine.writel(GPMI_BASE + 0x000, 0);
+    await machine.writel(APBH_BASE + 0x008, 0xc0000000);
+    await machine.setIrqIn('/machine/soc/gpmi', 'rdy-busy', 0, 0);
+
+    /*
+     * FREEZE while WAIT4ENDCMD is pending must defer the completion until the
+     * channel is unfrozen.  The peripheral end-of-command is not lost.
+     */
+    await startWait4endcmd(apbhChannel4NextCommand, waitDescriptor, doneDescriptor, bar, bar);
+    assert.equal(
+      await machine.readl(apbhChannel4CurrentCommand),
+      waitDescriptor,
+      'APBH CH4 WAIT4ENDCMD must hold the descriptor while waiting for ready',
+    );
+    assert.equal(
+      await machine.readl(apbhChannel4Debug2),
+      expectedDebug2,
+      'APBH CH4 DEBUG2 must keep remaining APB bytes while WAIT4ENDCMD is pending',
+    );
+    assert.equal(
+      await machine.readl(bar),
+      0,
+      'APBH CH4 DMA_WRITE must zero the BAR while waiting for ready',
+    );
+
+    await machine.writel(APBH_BASE + 0x004, 1 << 4);
+    assert.equal(
+      await machine.readl(apbhChannel4CurrentCommand),
+      waitDescriptor,
+      'FREEZE_CHANNEL must not retire the WAIT4ENDCMD descriptor immediately',
+    );
+
+    await machine.setIrqIn('/machine/soc/gpmi', 'rdy-busy', 0, 1);
+    assert.notEqual(
+      (await machine.readl(GPMI_BASE + 0x0c0)) & (1 << 28),
+      0,
+      'GPMI READY0 view must be high while frozen',
+    );
+    assert.equal(
+      await machine.readl(apbhChannel4CurrentCommand),
+      waitDescriptor,
+      'WAIT4ENDCMD completion must be deferred while the channel is frozen',
+    );
+    assert.equal(
+      await machine.readl(apbhChannel4Semaphore),
+      0x00010000,
+      'APBH CH4 semaphore must not be consumed while the completion is deferred',
+    );
+    assert.equal(
+      await machine.readl(apbhChannel4Debug2),
+      expectedDebug2,
+      'APBH CH4 DEBUG2 must keep remaining bytes while the completion is deferred',
+    );
+
+    await machine.setIrqIn('/machine/soc/gpmi', 'rdy-busy', 0, 0);
+    await machine.writel(APBH_BASE + 0x008, 1 << 4);
+    assert.equal(
+      await machine.readl(apbhChannel4CurrentCommand),
+      doneDescriptor,
+      'Unfreezing APBH CH4 must complete the deferred WAIT4ENDCMD and load the next descriptor',
+    );
+    assert.equal(
+      await machine.readl(apbhChannel4Debug2),
+      0,
+      'APBH CH4 DEBUG2 must clear after the deferred WAIT4ENDCMD completes',
+    );
+    assert.equal(
+      await machine.readl(apbhChannel4Semaphore),
+      0,
+      'APBH CH4 semaphore must be consumed after the deferred completion finishes',
+    );
+    assert.notEqual(
+      await machine.readl(APBH_BASE + 0x010) & (1 << 4),
+      0,
+      'APBH CH4 CMDCMPLT_IRQ must be set after the deferred completion finishes',
+    );
+    await machine.writel(APBH_BASE + 0x018, 0x00ffffff);
+
+    /*
+     * CLKGATE while WAIT4ENDCMD is pending must also defer the completion.
+     */
+    await startWait4endcmd(apbhChannel4NextCommand, waitDescriptor2, doneDescriptor2, bar2, bar2);
+    assert.equal(
+      await machine.readl(apbhChannel4CurrentCommand),
+      waitDescriptor2,
+      'APBH CH4 WAIT4ENDCMD must hold the second descriptor while waiting for ready',
+    );
+
+    await machine.writel(APBH_BASE + 0x004, 1 << 12);
+    assert.equal(
+      await machine.readl(apbhChannel4CurrentCommand),
+      waitDescriptor2,
+      'CLKGATE_CHANNEL must not retire the WAIT4ENDCMD descriptor immediately',
+    );
+
+    await machine.setIrqIn('/machine/soc/gpmi', 'rdy-busy', 0, 1);
+    assert.equal(
+      await machine.readl(apbhChannel4CurrentCommand),
+      waitDescriptor2,
+      'WAIT4ENDCMD completion must be deferred while the channel is clock-gated',
+    );
+    assert.equal(
+      await machine.readl(apbhChannel4Semaphore),
+      0x00010000,
+      'APBH CH4 semaphore must not be consumed while the completion is clock-gated',
+    );
+    assert.equal(
+      await machine.readl(apbhChannel4Debug2),
+      expectedDebug2,
+      'APBH CH4 DEBUG2 must keep remaining bytes while the completion is clock-gated',
+    );
+
+    await machine.setIrqIn('/machine/soc/gpmi', 'rdy-busy', 0, 0);
+    await machine.writel(APBH_BASE + 0x008, 1 << 12);
+    assert.equal(
+      await machine.readl(apbhChannel4CurrentCommand),
+      doneDescriptor2,
+      'Un-gating APBH CH4 clock must complete the deferred WAIT4ENDCMD and load the next descriptor',
+    );
+    assert.equal(
+      await machine.readl(apbhChannel4Debug2),
+      0,
+      'APBH CH4 DEBUG2 must clear after the clock-gated completion finishes',
+    );
+    assert.equal(
+      await machine.readl(apbhChannel4Semaphore),
+      0,
+      'APBH CH4 semaphore must be consumed after the clock-gated completion finishes',
+    );
+    assert.notEqual(
+      await machine.readl(APBH_BASE + 0x010) & (1 << 4),
+      0,
+      'APBH CH4 CMDCMPLT_IRQ must be set after the clock-gated completion finishes',
+    );
+    await machine.writel(APBH_BASE + 0x018, 0x00ffffff);
+
+    /*
+     * RESET while WAIT4ENDCMD is pending must cancel the descriptor and not
+     * resume after the peripheral completion arrives.
+     */
+    await startWait4endcmd(apbhChannel4NextCommand, waitDescriptor3, doneDescriptor3, bar3, bar3);
+    assert.equal(
+      await machine.readl(apbhChannel4CurrentCommand),
+      waitDescriptor3,
+      'APBH CH4 WAIT4ENDCMD must hold the third descriptor while waiting for ready',
+    );
+
+    await machine.writel(APBH_BASE + 0x004, 1 << 20);
+    assert.equal(
+      await machine.readl(apbhChannel4CurrentCommand),
+      0,
+      'RESET_CHANNEL must clear the WAIT4ENDCMD descriptor immediately',
+    );
+    assert.equal(
+      await machine.readl(apbhChannel4Semaphore),
+      0,
+      'RESET_CHANNEL must clear the semaphore immediately',
+    );
+    assert.equal(
+      await machine.readl(apbhChannel4Debug2),
+      0,
+      'RESET_CHANNEL must clear DEBUG2 immediately',
+    );
+
+    await machine.setIrqIn('/machine/soc/gpmi', 'rdy-busy', 0, 1);
+    assert.equal(
+      await machine.readl(apbhChannel4CurrentCommand),
+      0,
+      'WAIT4ENDCMD completion must be ignored after RESET_CHANNEL cancels the descriptor',
+    );
+    assert.equal(
+      await machine.readl(apbhChannel4Semaphore),
+      0,
+      'APBH CH4 semaphore must remain zero after a reset-cancelled completion',
+    );
+    assert.equal(
+      await machine.readl(apbhChannel4Debug2),
+      0,
+      'APBH CH4 DEBUG2 must remain zero after a reset-cancelled completion',
+    );
+    await machine.setIrqIn('/machine/soc/gpmi', 'rdy-busy', 0, 0);
+  });
+}
+
 async function testEcc8CompletionResultContract() {
   await withMachine(async (machine) => {
     const payload = SRAM_BASE + 0x1000;
@@ -5916,6 +6149,7 @@ const tests = [
   ['GPMI compare and DMA sense contract', testGpmiCompareSenseContract],
   ['GPMI WAIT_FOR_READY contract', testGpmiWaitForReadyContract],
   ['APBH DMA DEBUG2 remaining byte contract', testApbhDmaDebug2RemainingByteContract],
+  ['APBH DMA WAIT4ENDCMD freeze/clkgate/reset contract', testApbhDmaWait4endcmdFreezeClkgateResetContract],
   ['ECC8 completion result contract', testEcc8CompletionResultContract],
   ['ECC8 register contract', testEcc8RegisterContract],
   ['GPMI DATA FIFO contract', testGpmiDataFifoContract],
