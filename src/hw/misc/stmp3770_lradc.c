@@ -90,6 +90,7 @@ struct STMP3770LRADCState {
 #define CTRL0_SFTRST    (1U << 31)
 #define CTRL0_CLKGATE   (1U << 30)
 #define CTRL0_SCHEDULE_MASK 0xFF
+#define CTRL0_RW_MASK   (CTRL0_SFTRST | CTRL0_CLKGATE | (0x3FU << 16) | CTRL0_SCHEDULE_MASK)
 #define CTRL2_BL_ENABLE  (1U << 22)
 
 /* Channel result bits */
@@ -250,6 +251,7 @@ static void lradc_write(void *opaque, hwaddr offset,
     switch (base) {
     case REG_CTRL0:
         lradc_apply_sct(&s->ctrl0, (uint32_t)value, sct, offset, size);
+        s->ctrl0 &= CTRL0_RW_MASK;
         /* Hardware ties CLKGATE to SFTRST */
         if (s->ctrl0 & CTRL0_SFTRST) {
             s->ctrl0 |= CTRL0_CLKGATE;
