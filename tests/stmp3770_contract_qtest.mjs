@@ -3793,6 +3793,78 @@ async function testApbxDma64KAndAhbErrorContract() {
   });
 }
 
+async function testApbxDmaSenseReservedContract() {
+  await withMachine(async (machine) => {
+    const apbxCh0Cur = APBX_BASE + 0x040;
+    const apbxCh0Nxt = APBX_BASE + 0x050;
+    const apbxCh0Cmd = APBX_BASE + 0x060;
+    const apbxCh0Bar = APBX_BASE + 0x070;
+    const apbxCh0Sema = APBX_BASE + 0x080;
+    const senseDescriptor = 0x00000520;
+    const successDescriptor = 0x00000530;
+    const errorTarget = 0x00000540;
+    const dmaSense = 3;
+    const chainBit = 1 << 2;
+    const irqOnCompleteBit = 1 << 3;
+    const semaphoreBit = 1 << 6;
+    const dmaTerminal = semaphoreBit | irqOnCompleteBit;
+
+    /* Release APBX from reset and clock gate. */
+    await machine.writel(APBX_BASE + 0x008, 0xc0000000);
+    await machine.writel(APBX_BASE + 0x018, 0x00ffffff);
+
+    /*
+     * APBX COMMAND=3 is reserved.  It must not act like APBH DMA_SENSE
+     * (which would branch to BAR when the GPMI sense line is true) and
+     * instead should be treated as a NO_DMA_XFER with CHAIN/SEMAPHORE/IRQ.
+     */
+    await machine.writel(errorTarget, 0xdeadbeef);
+
+    await machine.writel(senseDescriptor + 0x00, successDescriptor);
+    await machine.writel(senseDescriptor + 0x04,
+                         dmaSense | chainBit | irqOnCompleteBit | semaphoreBit);
+    await machine.writel(senseDescriptor + 0x08, errorTarget);
+
+    await machine.writel(successDescriptor + 0x00, 0);
+    await machine.writel(successDescriptor + 0x04, dmaTerminal);
+    await machine.writel(successDescriptor + 0x08, 0);
+
+    await machine.writel(apbxCh0Nxt, senseDescriptor);
+    await machine.writel(apbxCh0Sema, 1);
+
+    assert.equal(
+      await machine.readl(apbxCh0Cur),
+      successDescriptor,
+      'APBX COMMAND=3 reserved must chain to NXTCMDAR instead of branching to BAR',
+    );
+    assert.equal(
+      await machine.readl(apbxCh0Cmd) & 0x00000003,
+      0,
+      'APBX COMMAND=3 reserved must leave the loaded command as the next descriptor',
+    );
+    assert.equal(
+      await machine.readl(apbxCh0Bar),
+      0,
+      'APBX COMMAND=3 reserved must not use the sense descriptor BAR as a transfer address',
+    );
+    assert.equal(
+      await machine.readl(errorTarget),
+      0xdeadbeef,
+      'APBX COMMAND=3 reserved must not write to the BAR target',
+    );
+    assert.equal(
+      await machine.readl(apbxCh0Sema),
+      0,
+      'APBX COMMAND=3 reserved must consume the semaphore',
+    );
+    assert.notEqual(
+      await machine.readl(APBX_BASE + 0x010) & 1,
+      0,
+      'APBX COMMAND=3 reserved must still honor IRQONCMPLT',
+    );
+  });
+}
+
 async function testDmaCtrl1AndDevselContract() {
   await withMachine(async (machine) => {
     /* Release both DMAs from reset and clock gate. */
@@ -6154,6 +6226,7 @@ const tests = [
   ['ECC8 register contract', testEcc8RegisterContract],
   ['GPMI DATA FIFO contract', testGpmiDataFifoContract],
   ['APBX DMA 64 KiB and AHB error contract', testApbxDma64KAndAhbErrorContract],
+  ['APBX DMA SENSE reserved contract', testApbxDmaSenseReservedContract],
   ['DMA CTRL1 and DEVSEL writable mask contract', testDmaCtrl1AndDevselContract],
   ['DMA reset/freeze/clkgate contract', testDmaResetFreezeClkgateContract],
   ['on-chip ROM and SRAM mirror contract', testOnChipRomAndSramMirrorContract],
