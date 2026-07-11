@@ -546,6 +546,7 @@ static void lradc_write(void *opaque, hwaddr offset,
             lradc_reset(DEVICE(s));
         }
         lradc_update_analog_power(s);
+        lradc_update_irq(s);
         /* Complete any scheduled conversions once the clock is running */
         if (!(s->ctrl0 & CTRL0_CLKGATE) && (s->ctrl0 & CTRL0_SCHEDULE_MASK)) {
             lradc_complete_scheduled(s);

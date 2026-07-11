@@ -1480,6 +1480,58 @@ async function testLradcCtrl3PowerAndDiscardContract() {
   });
 }
 
+async function testLradcStatusAndCtrl3ClockContract() {
+  await withMachine(async (machine) => {
+    /* STATUS present bits and reset */
+    assert.equal(
+      await machine.readl(LRADC_BASE + 0x040),
+      0x07ff0000,
+      'LRADC STATUS must report all channels, touch and temperature sources present',
+    );
+
+    /* TOUCH_DETECT_RAW follows touch-detect input only when TOUCH_DETECT_ENABLE is set */
+    await machine.setIrqIn('/machine/soc/lradc', 'touch-detect', 0, 1);
+    assert.equal(
+      await machine.readl(LRADC_BASE + 0x040),
+      0x07ff0000,
+      'TOUCH_DETECT_RAW must stay 0 when TOUCH_DETECT_ENABLE is not set',
+    );
+
+    await machine.writel(LRADC_BASE + 0x000, 0x00100000); /* TOUCH_DETECT_ENABLE */
+    assert.equal(
+      await machine.readl(LRADC_BASE + 0x040),
+      0x07ff0001,
+      'TOUCH_DETECT_RAW must follow touch-detect input when enabled by CTRL0',
+    );
+
+    await machine.writel(LRADC_BASE + 0x000, 0x00000000); /* clear TOUCH_DETECT_ENABLE */
+    assert.equal(
+      await machine.readl(LRADC_BASE + 0x040),
+      0x07ff0000,
+      'TOUCH_DETECT_RAW must be gated off when TOUCH_DETECT_ENABLE is cleared',
+    );
+
+    await machine.setIrqIn('/machine/soc/lradc', 'touch-detect', 0, 0);
+
+    /* CTRL3 clock parameters are writable and readable */
+    await machine.writel(LRADC_BASE + 0x030, 0x03000000); /* CYCLE_TIME=0x3, DISCARD=0x3 */
+    assert.equal(
+      await machine.readl(LRADC_BASE + 0x030),
+      0x03000000,
+      'CTRL3 CYCLE_TIME=0x3 and DISCARD=0x3 must be readable',
+    );
+
+    await machine.writel(LRADC_BASE + 0x030, 0x00000033); /* HIGH_TIME=0x3, DELAY_CLOCK=1, INVERT_CLOCK=1 */
+    assert.equal(
+      await machine.readl(LRADC_BASE + 0x030),
+      0x00000033,
+      'CTRL3 HIGH_TIME/DELAY_CLOCK/INVERT_CLOCK must be readable',
+    );
+
+    await machine.writel(LRADC_BASE + 0x030, 0x00000000); /* restore */
+  });
+}
+
 async function testI2cRegisterContract() {
   await withMachine(async (machine) => {
     assert.equal(
@@ -5327,6 +5379,7 @@ const tests = [
   ['LRADC divide-by-two contract', testLradcDivideByTwoContract],
   ['LRADC temperature current source contract', testLradcTempCurrentContract],
   ['LRADC CTRL3 power and discard contract', testLradcCtrl3PowerAndDiscardContract],
+  ['LRADC STATUS and CTRL3 clock contract', testLradcStatusAndCtrl3ClockContract],
   ['I2C register contract', testI2cRegisterContract],
   ['I2C DMA IRQ ownership contract', testI2cDmaIrqOwnershipContract],
   ['Application UART register contract', testAppUartRegisterContract],
