@@ -917,6 +917,13 @@ async function testLradcRegisterContract() {
     const ctrl0 = await machine.readl(LRADC_BASE + 0x000);
     assert.equal(ctrl0, 0xc0000000, 'LRADC CTRL0 must reset with SFTRST/CLKGATE');
 
+    /* CTRL2 resets with TEMPSENSE_PWD asserted (temperature sensor block powered down) */
+    assert.equal(
+      await machine.readl(LRADC_BASE + 0x020),
+      0x00008000,
+      'LRADC CTRL2 must reset with TEMPSENSE_PWD asserted',
+    );
+
     /* Reserved bits in CTRL1-3 and CONVERSION read as zero and are not writable */
     await machine.writel(LRADC_BASE + 0x010, 0xffffffff);
     assert.equal(
@@ -975,6 +982,11 @@ async function testLradcRegisterContract() {
       await machine.readl(LRADC_BASE + 0x010),
       0,
       'LRADC SFTRST must clear CTRL1',
+    );
+    assert.equal(
+      await machine.readl(LRADC_BASE + 0x020),
+      0x00008000,
+      'LRADC SFTRST must restore CTRL2 TEMPSENSE_PWD',
     );
     assert.equal(
       (await machine.readl(LRADC_BASE + 0x0c0)) & 0x3ffff,

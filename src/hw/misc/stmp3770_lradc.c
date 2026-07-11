@@ -575,7 +575,7 @@ static void lradc_reset(DeviceState *dev)
     lradc_stop_all_delays(s);
     s->ctrl0 = CTRL0_SFTRST | CTRL0_CLKGATE;
     s->ctrl1 = 0;
-    s->ctrl2 = 0;
+    s->ctrl2 = CTRL2_TEMPSENSE_PWD;
     lradc_update_pwm2_analog_enable(s);
     s->ctrl3 = 0;
     s->ctrl4 = 0x76543210;  /* default channel MUX mapping */
@@ -667,7 +667,7 @@ static void lradc_init(Object *obj)
 
     s->ctrl0 = CTRL0_SFTRST | CTRL0_CLKGATE;
     s->ctrl1 = 0;
-    s->ctrl2 = 0;
+    s->ctrl2 = CTRL2_TEMPSENSE_PWD;
     s->ctrl3 = 0;
     s->ctrl4 = 0x76543210;
     s->conversion = 0x00000080;
