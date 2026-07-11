@@ -60,6 +60,9 @@ struct STMP3770LRADCState {
     uint8_t delay_loop_remaining[4];
     int64_t delay_remaining_ns[4];
     uint8_t sample_count[8];
+
+    /* Touch detection: set by external (UI) input; gated by TOUCH_DETECT_ENABLE */
+    bool touch_detect;
 };
 
 #define LRADC_VERSION   0x01010000
@@ -107,8 +110,10 @@ struct STMP3770LRADCState {
 #define CTRL0_SFTRST    (1U << 31)
 #define CTRL0_CLKGATE   (1U << 30)
 #define CTRL0_SCHEDULE_MASK 0xFF
+#define CTRL0_TOUCH_DETECT_ENABLE (1U << 20)
 #define CTRL0_RW_MASK   (CTRL0_SFTRST | CTRL0_CLKGATE | (0x3FU << 16) | CTRL0_SCHEDULE_MASK)
 #define CTRL2_BL_ENABLE  (1U << 22)
+#define CTRL2_TEMPSENSE_PWD (1U << 15)
 #define DELAY_KICK       (1U << 20)
 #define DELAY_TICK_NS    500000
 
@@ -137,6 +142,7 @@ struct STMP3770LRADCState {
 
 /* STATUS bits */
 #define STATUS_CHANNEL_PRESENT_MASK 0x07FF0000
+#define STATUS_R_MASK   0x07FF0001U
 
 static uint64_t lradc_read_subword(uint32_t value, hwaddr offset, unsigned size)
 {
@@ -171,6 +177,7 @@ static void lradc_apply_sct(uint32_t *reg, uint32_t value, int sct,
     *reg = (*reg & ~(mask << shift)) | ((cur & mask) << shift);
 }
 
+static void lradc_update_status(STMP3770LRADCState *s);
 static void lradc_update_irq(STMP3770LRADCState *s);
 static void lradc_complete_scheduled(STMP3770LRADCState *s);
 static void lradc_start_delay(STMP3770LRADCState *s, int n, bool reload_loop);
@@ -180,12 +187,30 @@ static void lradc_resume_all_delays(STMP3770LRADCState *s);
 static void lradc_handle_clockgate(STMP3770LRADCState *s);
 static void lradc_update_delay_remaining(STMP3770LRADCState *s);
 
+static uint32_t lradc_sample_value(STMP3770LRADCState *s, int ch)
+{
+    uint32_t physical = (s->ctrl4 >> (ch * 4)) & 0xF;
+
+    if (physical < 8) {
+        return 0xABC;
+    }
+
+    if (physical == 8 || physical == 9) {
+        if (s->ctrl2 & CTRL2_TEMPSENSE_PWD) {
+            return 0;
+        }
+        return (physical == 8) ? 0x400 : 0x800;
+    }
+
+    return 0;
+}
+
 static void lradc_complete_channel(STMP3770LRADCState *s, int ch)
 {
     uint32_t num_samples = (s->channel[ch] >> CH_NUM_SAMPLES_SHIFT) &
                            CH_NUM_SAMPLES_MASK;
     uint32_t target = num_samples ? num_samples : 1;
-    uint32_t value = 0xABC;
+    uint32_t value = lradc_sample_value(s, ch);
     uint32_t current_value = s->channel[ch] & CH_VALUE_MASK;
 
     if (s->channel[ch] & CH_ACCUMULATE) {
@@ -234,9 +259,24 @@ static void lradc_update_pwm2_analog_enable(STMP3770LRADCState *s)
     }
 }
 
+static void lradc_update_status(STMP3770LRADCState *s)
+{
+    s->status = STATUS_CHANNEL_PRESENT_MASK;
+    if (s->touch_detect && (s->ctrl0 & CTRL0_TOUCH_DETECT_ENABLE)) {
+        s->status |= 1;  /* TOUCH_DETECT_RAW */
+    }
+}
+
 static void lradc_update_irq(STMP3770LRADCState *s)
 {
     int i;
+
+    lradc_update_status(s);
+
+    /* Hardware sets TOUCH_DETECT_IRQ when a touch is detected and enabled */
+    if (s->status & 1) {
+        s->ctrl1 |= (1U << 8);
+    }
 
     for (i = 0; i < 8; i++) {
         bool pending = (s->ctrl1 >> i) & 1;
@@ -383,8 +423,7 @@ static uint64_t lradc_read(void *opaque, hwaddr offset, unsigned size)
         ret = s->ctrl3 & CTRL3_RW_MASK;
         break;
     case REG_STATUS:
-        /* Report all LRADC channels as present */
-        ret = STATUS_CHANNEL_PRESENT_MASK;
+        ret = s->status & STATUS_R_MASK;
         break;
     case REG_CH0 ... REG_CH7:
         {
@@ -550,6 +589,7 @@ static void lradc_reset(DeviceState *dev)
     memset(s->delay_loop_remaining, 0, sizeof(s->delay_loop_remaining));
     memset(s->delay_remaining_ns, 0, sizeof(s->delay_remaining_ns));
     memset(s->sample_count, 0, sizeof(s->sample_count));
+    s->touch_detect = false;
     s->debug0 = 0x43210000;
     s->debug1 = 0;
     lradc_update_irq(s);
@@ -616,6 +656,7 @@ static const VMStateDescription vmstate_lradc = {
         VMSTATE_UINT8_ARRAY(delay_loop_remaining, STMP3770LRADCState, 4),
         VMSTATE_INT64_ARRAY(delay_remaining_ns, STMP3770LRADCState, 4),
         VMSTATE_UINT8_ARRAY(sample_count, STMP3770LRADCState, 8),
+        VMSTATE_BOOL(touch_detect, STMP3770LRADCState),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -638,6 +679,8 @@ static void lradc_init(Object *obj)
     memset(s->delay_loop_remaining, 0, sizeof(s->delay_loop_remaining));
     memset(s->delay_remaining_ns, 0, sizeof(s->delay_remaining_ns));
     memset(s->sample_count, 0, sizeof(s->sample_count));
+    s->touch_detect = false;
+    lradc_update_status(s);
     s->debug0 = 0x43210000;
     s->debug1 = 0;
 }

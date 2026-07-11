@@ -1127,6 +1127,76 @@ async function testLradcSchedulerContract() {
   });
 }
 
+async function testLradcTouchTemperatureContract() {
+  await withMachine(async (machine) => {
+    /* STATUS reports touch panel and temperature sources present, no touch raw */
+    assert.equal(
+      await machine.readl(LRADC_BASE + 0x040),
+      0x07ff0000,
+      'LRADC STATUS must report touch panel and all channels present',
+    );
+
+    /* Enable touch detection and the touch IRQ */
+    await machine.writel(LRADC_BASE + 0x000, 0x00100000); /* TOUCH_DETECT_ENABLE */
+    assert.equal(
+      await machine.readl(LRADC_BASE + 0x040),
+      0x07ff0000,
+      'TOUCH_DETECT_RAW must be 0 when no touch is active',
+    );
+
+    await machine.writel(LRADC_BASE + 0x010, 0x01000100); /* TOUCH_DETECT_IRQ + EN */
+    assert.notEqual(
+      await machine.readl(ICOLL_BASE + 0x050) & (1 << 4),
+      0,
+      'TOUCH_DETECT_IRQ must assert ICOLL source 36',
+    );
+    await machine.writel(LRADC_BASE + 0x018, 0x01000100); /* clear */
+    assert.equal(
+      await machine.readl(ICOLL_BASE + 0x050) & (1 << 4),
+      0,
+      'TOUCH_DETECT_IRQ must deassert when cleared',
+    );
+
+    /* Temperature sensor mapping: CH0 -> physical 8, TEMPSENSE_PWD disabled first */
+    await machine.writel(LRADC_BASE + 0x140, 0x76543218);
+    await machine.writel(LRADC_BASE + 0x020, 0x00000000); /* clear TEMPSENSE_PWD */
+    await machine.writel(LRADC_BASE + 0x010, 0x00010001); /* enable LRADC0 IRQ */
+    await machine.writel(LRADC_BASE + 0x000, 0x00000001); /* schedule CH0 */
+    assert.equal(
+      (await machine.readl(LRADC_BASE + 0x050)) & 0x3ffff,
+      0x400,
+      'CH0 mapped to physical 8 with TEMPSENSE enabled must be 0x400',
+    );
+
+    await machine.writel(LRADC_BASE + 0x018, 0x00010001); /* clear LRADC0 IRQ */
+    await machine.writel(LRADC_BASE + 0x140, 0x76543219); /* CH0 -> physical 9 */
+    await machine.writel(LRADC_BASE + 0x000, 0x00000001); /* schedule CH0 */
+    assert.equal(
+      (await machine.readl(LRADC_BASE + 0x050)) & 0x3ffff,
+      0x800,
+      'CH0 mapped to physical 9 with TEMPSENSE enabled must be 0x800',
+    );
+
+    await machine.writel(LRADC_BASE + 0x018, 0x00010001); /* clear LRADC0 IRQ */
+    await machine.writel(LRADC_BASE + 0x020, 0x00008000); /* set TEMPSENSE_PWD */
+    await machine.writel(LRADC_BASE + 0x000, 0x00000001); /* schedule CH0 */
+    assert.equal(
+      (await machine.readl(LRADC_BASE + 0x050)) & 0x3ffff,
+      0,
+      'CH0 mapped to physical 9 with TEMPSENSE powered down must be 0',
+    );
+
+    await machine.writel(LRADC_BASE + 0x018, 0x00010001); /* clear LRADC0 IRQ */
+    await machine.writel(LRADC_BASE + 0x140, 0x76543210); /* CH0 -> physical 0 */
+    await machine.writel(LRADC_BASE + 0x000, 0x00000001); /* schedule CH0 */
+    assert.equal(
+      (await machine.readl(LRADC_BASE + 0x050)) & 0x3ffff,
+      0xabc,
+      'CH0 mapped to physical 0 must be 0xabc',
+    );
+  });
+}
+
 async function testI2cRegisterContract() {
   await withMachine(async (machine) => {
     assert.equal(
@@ -4970,6 +5040,7 @@ const tests = [
   ['LRADC register contract', testLradcRegisterContract],
   ['LRADC IRQ contract', testLradcIrqContract],
   ['LRADC scheduler contract', testLradcSchedulerContract],
+  ['LRADC touch/temperature contract', testLradcTouchTemperatureContract],
   ['I2C register contract', testI2cRegisterContract],
   ['I2C DMA IRQ ownership contract', testI2cDmaIrqOwnershipContract],
   ['Application UART register contract', testAppUartRegisterContract],
