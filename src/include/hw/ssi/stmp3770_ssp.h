@@ -15,6 +15,7 @@
 #define STMP3770_SSP_H
 
 #include "hw/sysbus.h"
+#include "hw/dma/stmp3770_dma.h"
 
 #define TYPE_STMP3770_SSP "stmp3770-ssp"
 
@@ -76,6 +77,9 @@ struct STMP3770SSPState {
     qemu_irq irq_dma;
     qemu_irq irq_error;
 
+    STMP3770DMAState *dma;
+    int dma_channel;
+
     uint32_t ctrl0;
     uint32_t ctrl1;
     uint32_t words_remaining;
@@ -89,5 +93,8 @@ struct STMP3770SSPState {
     uint32_t status;
     uint32_t debug;
 };
+
+void stmp3770_ssp_set_dma(STMP3770SSPState *s, STMP3770DMAState *dma,
+                          int channel);
 
 #endif /* STMP3770_SSP_H */

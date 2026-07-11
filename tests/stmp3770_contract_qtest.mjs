@@ -2681,6 +2681,128 @@ async function testSspDataEmptyReadContract() {
   });
 }
 
+async function testSspDmaReadWriteContract() {
+  await withMachine(async (machine) => {
+    const runBit = 1 << 29;
+    const onePioWord = 1 << 12;
+    const chainBit = 1 << 2;
+    const irqOnCompleteBit = 1 << 3;
+    const semaphoreBit = 1 << 6;
+    const dmaWrite = 1;
+    const dmaRead = 2;
+    const xferCount = 4;
+    const pioCtrl0 = runBit | xferCount;
+
+    const writeDescriptor = async (address, next, command, bar, ctrl0 = undefined) => {
+      await machine.writel(address + 0x00, next);
+      await machine.writel(address + 0x04, command);
+      await machine.writel(address + 0x08, bar);
+      if (ctrl0 !== undefined) {
+        await machine.writel(address + 0x0c, ctrl0);
+      }
+    };
+
+    async function runSspDmaFor(sspBase, chCur, chNxt, chSema, chDebug2, desc, doneDesc, bar) {
+      const terminal = semaphoreBit | irqOnCompleteBit;
+      const writeCommand = (xferCount << 16) | onePioWord | chainBit | dmaWrite;
+      const readCommand = (xferCount << 16) | onePioWord | chainBit | dmaRead;
+      const readDesc = desc + 0x80;
+      const readDoneDesc = doneDesc + 0x80;
+      const readBar = bar + 0x80;
+
+      // release SSP clock gate and reset, then seed DATA
+      await machine.writel(CLKCTRL_BASE + 0x070, 0x00000001);
+      await machine.writel(sspBase + 0x008, 0xc0000000);
+      await machine.writel(sspBase + 0x070, 0x42);
+      await machine.writel(bar, 0);
+
+      // DMA_WRITE (peripheral -> memory)
+      await writeDescriptor(desc, doneDesc, writeCommand, bar, pioCtrl0);
+      await writeDescriptor(doneDesc, 0, terminal, 0);
+      await machine.writel(chNxt, desc);
+      await machine.writel(chSema, 1);
+
+      assert.equal(
+        await machine.readl(chCur),
+        doneDesc,
+        'SSP DMA_WRITE chain must complete the terminal descriptor',
+      );
+      assert.equal(
+        await machine.readl(bar),
+        0x42424242,
+        'SSP DMA_WRITE must copy the current DATA register to BAR',
+      );
+      assert.equal(
+        await machine.readl(chDebug2),
+        0,
+        'SSP DMA_WRITE must clear DEBUG2 after completion',
+      );
+      assert.equal(
+        await machine.readl(chSema),
+        0,
+        'SSP DMA_WRITE must consume the terminal semaphore',
+      );
+      assert.equal(
+        (await machine.readl(sspBase + 0x000)) & (1 << 29),
+        0,
+        'SSP DMA_WRITE must clear RUN after XFER_COUNT bytes',
+      );
+      assert.notEqual(
+        (await machine.readl(sspBase + 0x0c0)) & (1 << 5),
+        0,
+        'SSP DMA_WRITE must leave FIFO_EMPTY set after completion',
+      );
+
+      // DMA_READ (memory -> peripheral)
+      await machine.writel(readBar, 0x04030201);
+      await writeDescriptor(readDesc, readDoneDesc, readCommand, readBar, pioCtrl0);
+      await writeDescriptor(readDoneDesc, 0, terminal, 0);
+      await machine.writel(chNxt, readDesc);
+      await machine.writel(chSema, 1);
+
+      assert.equal(
+        await machine.readl(chCur),
+        readDoneDesc,
+        'SSP DMA_READ chain must complete the terminal descriptor',
+      );
+      assert.equal(
+        await machine.readl(sspBase + 0x070),
+        0x04,
+        'SSP DMA_READ must leave the last memory byte in DATA',
+      );
+      assert.equal(
+        await machine.readl(chDebug2),
+        0,
+        'SSP DMA_READ must clear DEBUG2 after completion',
+      );
+      assert.equal(
+        await machine.readl(chSema),
+        0,
+        'SSP DMA_READ must consume the terminal semaphore',
+      );
+      assert.equal(
+        (await machine.readl(sspBase + 0x000)) & (1 << 29),
+        0,
+        'SSP DMA_READ must clear RUN after XFER_COUNT bytes',
+      );
+    }
+
+    // release APBH reset/clock gate
+    await machine.writel(APBH_BASE + 0x008, 0xc0000000);
+
+    await runSspDmaFor(
+      SSP1_BASE,
+      APBH_BASE + 0x0b0, APBH_BASE + 0x0c0, APBH_BASE + 0x0f0, APBH_BASE + 0x110,
+      SRAM_BASE + 0x3100, SRAM_BASE + 0x3140, SRAM_BASE + 0x00010000,
+    );
+    await runSspDmaFor(
+      SSP2_BASE,
+      APBH_BASE + 0x120, APBH_BASE + 0x130, APBH_BASE + 0x160, APBH_BASE + 0x180,
+      SRAM_BASE + 0x3200, SRAM_BASE + 0x3240, SRAM_BASE + 0x00010004,
+    );
+  });
+}
+
 async function testGpmiTiming2Contract() {
   await withMachine(async (machine) => {
     await machine.writel(GPMI_BASE + 0x080, 0xffffffff);
@@ -5787,6 +5909,7 @@ const tests = [
   ['SSP SCT and CMD0 reserved contract', testSspSctAndCmd0ReservedContract],
   ['SSP error IRQ pairing contract', testSspErrorIrqPairingContract],
   ['SSP DATA empty read contract', testSspDataEmptyReadContract],
+  ['SSP APBH DMA read/write contract', testSspDmaReadWriteContract],
   ['GPMI TIMING2 contract', testGpmiTiming2Contract],
   ['GPMI CTRL1 contract', testGpmiCtrl1Contract],
   ['GPMI ECC register contract', testGpmiEccRegisterContract],

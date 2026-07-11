@@ -60,16 +60,32 @@ static void stmp3770_ssp_update_irq(STMP3770SSPState *s)
                  (pending & s->ctrl1 & SSP_CTRL1_ERROR_IRQ_ENABLE_MASK) != 0);
 }
 
+static unsigned int stmp3770_ssp_bytes_per_word(STMP3770SSPState *s)
+{
+    unsigned int word_length = (s->ctrl1 >> 4) & 0xFU;
+    unsigned int bytes_per_word = (word_length + 7U) / 8U;
+
+    return bytes_per_word ? bytes_per_word : 1;
+}
+
 static void stmp3770_ssp_complete_data_word(STMP3770SSPState *s)
 {
+    unsigned int bytes_per_word = stmp3770_ssp_bytes_per_word(s);
+
     if (s->words_remaining == 0) {
         return;
     }
 
-    s->words_remaining--;
+    if (s->words_remaining > bytes_per_word) {
+        s->words_remaining -= bytes_per_word;
+    } else {
+        s->words_remaining = 0;
+    }
+
+    s->status |= SSP_STATUS_FIFO_EMPTY;
+
     if (s->words_remaining == 0) {
         s->ctrl0 &= ~SSP_CTRL0_RUN;
-        s->status |= SSP_STATUS_FIFO_EMPTY;
         s->status &= ~(SSP_STATUS_BUSY | SSP_STATUS_CMD_BUSY |
                        SSP_STATUS_DATA_BUSY);
     }
@@ -204,6 +220,10 @@ static void stmp3770_ssp_write(void *opaque, hwaddr offset,
             s->words_remaining = s->ctrl0 & 0xffffU;
             if (s->words_remaining == 0) {
                 s->ctrl0 &= ~SSP_CTRL0_RUN;
+            } else {
+                s->status |= SSP_STATUS_BUSY | SSP_STATUS_CMD_BUSY |
+                            SSP_STATUS_DATA_BUSY;
+                s->status |= SSP_STATUS_FIFO_EMPTY;
             }
         }
         break;
@@ -231,6 +251,7 @@ static void stmp3770_ssp_write(void *opaque, hwaddr offset,
     case SSP_DATA:
         s->data = (uint32_t)value;
         if ((s->ctrl0 & SSP_CTRL0_RUN) && stmp3770_ssp_enabled(s)) {
+            s->status &= ~SSP_STATUS_FIFO_EMPTY;
             stmp3770_ssp_complete_data_word(s);
         }
         break;
@@ -320,6 +341,99 @@ static const TypeInfo stmp3770_ssp_type_info = {
     .instance_init = stmp3770_ssp_init,
     .class_init    = stmp3770_ssp_class_init,
 };
+
+static void stmp3770_ssp_dma_load_word(STMP3770SSPState *s,
+                                        const uint8_t *src,
+                                        unsigned int bytes_per_word)
+{
+    uint32_t word = 0;
+    unsigned int b;
+
+    for (b = 0; b < bytes_per_word; b++) {
+        word |= (uint32_t)src[b] << (b * 8);
+    }
+    s->data = word;
+}
+
+static void stmp3770_ssp_dma_store_word(STMP3770SSPState *s, uint8_t *dst,
+                                        unsigned int bytes_per_word)
+{
+    uint32_t word = s->data;
+    unsigned int b;
+
+    for (b = 0; b < bytes_per_word; b++) {
+        dst[b] = (word >> (b * 8)) & 0xff;
+    }
+}
+
+static int stmp3770_ssp_dma_handler(STMP3770DMAState *dma, int channel,
+                                    STMP3770DMAEvent event, void *buf,
+                                    size_t len, void *opaque)
+{
+    STMP3770SSPState *s = STMP3770_SSP(opaque);
+    unsigned int bytes_per_word = stmp3770_ssp_bytes_per_word(s);
+    size_t i;
+
+    if (event == STMP3770_DMA_EVENT_PIO) {
+        uint32_t *pio = (uint32_t *)buf;
+
+        if (len >= sizeof(uint32_t)) {
+            stmp3770_ssp_write(s, SSP_CTRL0, pio[0], 4);
+        }
+        return (int)len;
+    }
+
+    if (event == STMP3770_DMA_EVENT_DATA_WRITE) {
+        const uint8_t *src = (const uint8_t *)buf;
+
+        for (i = 0; i + bytes_per_word <= len; i += bytes_per_word) {
+            if (s->words_remaining < bytes_per_word) {
+                break;
+            }
+            stmp3770_ssp_dma_load_word(s, &src[i], bytes_per_word);
+            s->status &= ~SSP_STATUS_FIFO_EMPTY;
+            stmp3770_ssp_complete_data_word(s);
+            if (!(s->ctrl0 & SSP_CTRL0_RUN)) {
+                i += bytes_per_word;
+                break;
+            }
+        }
+        return (int)i;
+    }
+
+    if (event == STMP3770_DMA_EVENT_DATA_READ) {
+        uint8_t *dst = (uint8_t *)buf;
+
+        for (i = 0; i + bytes_per_word <= len; i += bytes_per_word) {
+            if (s->words_remaining < bytes_per_word) {
+                break;
+            }
+            stmp3770_ssp_dma_store_word(s, &dst[i], bytes_per_word);
+            stmp3770_ssp_complete_data_word(s);
+            if (!(s->ctrl0 & SSP_CTRL0_RUN)) {
+                i += bytes_per_word;
+                break;
+            }
+        }
+        return (int)i;
+    }
+
+    return 0;
+}
+
+void stmp3770_ssp_set_dma(STMP3770SSPState *s, STMP3770DMAState *dma,
+                          int channel)
+{
+    s->dma = dma;
+    s->dma_channel = channel;
+
+    if (!dma) {
+        return;
+    }
+
+    stmp3770_dma_set_channel_handler(dma, channel, stmp3770_ssp_dma_handler,
+                                     s);
+}
 
 static void stmp3770_ssp_register_types(void)
 {

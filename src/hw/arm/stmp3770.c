@@ -608,6 +608,10 @@ static void stmp3770_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(s->ssp[1]), 1,
                        qdev_get_gpio_in(DEVICE(s->icoll), STMP3770_IRQ_SSP2_ERROR));
 
+    /* Connect SSP1/SSP2 to APBH DMA channels 1/2 */
+    stmp3770_ssp_set_dma(s->ssp[0], s->apbh_dma, 1);
+    stmp3770_ssp_set_dma(s->ssp[1], s->apbh_dma, 2);
+
     /* APBX DMA channel IRQs */
     sysbus_connect_irq(SYS_BUS_DEVICE(s->apbx_dma), 0,
                        qdev_get_gpio_in(DEVICE(s->icoll), STMP3770_IRQ_ADC_DMA));
