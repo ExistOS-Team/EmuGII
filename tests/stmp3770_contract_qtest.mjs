@@ -3430,6 +3430,148 @@ async function testDmaCtrl1AndDevselContract() {
   });
 }
 
+async function testDmaResetFreezeClkgateContract() {
+  await withMachine(async (machine) => {
+    const apbhCh0Desc = SRAM_BASE + 0x4000;
+    const apbhCh1Desc = SRAM_BASE + 0x4040;
+    const apbxDesc = SRAM_BASE + 0x4100;
+    const apbhCh0Cur = APBH_BASE + 0x040;
+    const apbhCh0Nxt = APBH_BASE + 0x050;
+    const apbhCh0Cmd = APBH_BASE + 0x060;
+    const apbhCh0Sema = APBH_BASE + 0x080;
+    const apbhCh1Cur = APBH_BASE + 0x0b0;
+    const apbhCh1Nxt = APBH_BASE + 0x0c0;
+    const apbhCh1Sema = APBH_BASE + 0x0f0;
+    const apbxCh0Cur = APBX_BASE + 0x040;
+    const apbxCh0Nxt = APBX_BASE + 0x050;
+    const apbxCh0Cmd = APBX_BASE + 0x060;
+    const apbxCh0Sema = APBX_BASE + 0x080;
+
+    /* NO_DMA_XFER with SEMAPHORE and IRQONCMPLT (command = 0x48). */
+    const writeDescriptor = async (address) => {
+      await machine.writel(address + 0x00, 0);
+      await machine.writel(address + 0x04, 0x48);
+      await machine.writel(address + 0x08, 0);
+    };
+
+    const writeDescriptorAndKick = async (nxt, sema, desc) => {
+      await writeDescriptor(desc);
+      await machine.writel(nxt, desc);
+      await machine.writel(sema, 1);
+    };
+
+    /* Release both DMAs from reset and clear any clock gating. */
+    await machine.writel(APBH_BASE + 0x008, 0xc0000000);
+    await machine.writel(APBX_BASE + 0x008, 0xc0000000);
+
+    /* APBH channel 0 RESET self-clears and resets channel registers. */
+    await writeDescriptorAndKick(apbhCh0Nxt, apbhCh0Sema, apbhCh0Desc);
+    assert.equal(
+      await machine.readl(apbhCh0Cur),
+      apbhCh0Desc,
+      'APBH CH0 must load and run a NO_DMA_XFER command',
+    );
+    assert.equal(
+      await machine.readl(apbhCh0Cmd),
+      0x48,
+      'APBH CH0 CMD must reflect the loaded command',
+    );
+    assert.equal(
+      await machine.readl(APBH_BASE + 0x010),
+      1,
+      'APBH CH0 must set CMDCMPLT_IRQ in CTRL1',
+    );
+    await machine.writel(APBH_BASE + 0x004, 0x00010000);
+    assert.equal(
+      await machine.readl(APBH_BASE + 0x000),
+      0,
+      'APBH CH0 RESET bit must auto-clear',
+    );
+    assert.equal(
+      await machine.readl(apbhCh0Cur),
+      0,
+      'APBH CH0 CURCMDAR must be cleared by RESET',
+    );
+    assert.equal(
+      await machine.readl(apbhCh0Cmd),
+      0,
+      'APBH CH0 CMD must be cleared by RESET',
+    );
+    await machine.writel(APBH_BASE + 0x018, 0x00ffffff);
+
+    /* APBH CH0 FREEZE prevents command launch, clearing it resumes. */
+    await machine.writel(APBH_BASE + 0x004, 0x00000001);
+    await writeDescriptorAndKick(apbhCh0Nxt, apbhCh0Sema, apbhCh0Desc);
+    assert.equal(
+      await machine.readl(apbhCh0Cur),
+      0,
+      'APBH CH0 must not launch while FREEZE is set',
+    );
+    await machine.writel(APBH_BASE + 0x008, 0x00000001);
+    assert.equal(
+      await machine.readl(apbhCh0Cur),
+      apbhCh0Desc,
+      'APBH CH0 must resume and load the command when FREEZE is cleared',
+    );
+    assert.equal(
+      await machine.readl(apbhCh0Sema),
+      0,
+      'APBH CH0 SEMA must be decremented after resumed launch',
+    );
+    await machine.writel(APBH_BASE + 0x018, 0x00ffffff);
+
+    /* APBH CH1 CLKGATE_CHANNEL prevents command launch, clearing it resumes. */
+    await machine.writel(APBH_BASE + 0x004, 0x00000200);
+    await writeDescriptorAndKick(apbhCh1Nxt, apbhCh1Sema, apbhCh1Desc);
+    assert.equal(
+      await machine.readl(apbhCh1Cur),
+      0,
+      'APBH CH1 must not launch while CLKGATE_CHANNEL is set',
+    );
+    await machine.writel(APBH_BASE + 0x008, 0x00000200);
+    assert.equal(
+      await machine.readl(apbhCh1Cur),
+      apbhCh1Desc,
+      'APBH CH1 must resume and load the command when CLKGATE_CHANNEL is cleared',
+    );
+    await machine.writel(APBH_BASE + 0x018, 0x00ffffff);
+
+    /* APBX CH0 RESET and FREEZE behave the same. */
+    await writeDescriptorAndKick(apbxCh0Nxt, apbxCh0Sema, apbxDesc);
+    assert.equal(
+      await machine.readl(apbxCh0Cur),
+      apbxDesc,
+      'APBX CH0 must load and run a NO_DMA_XFER command',
+    );
+    await machine.writel(APBX_BASE + 0x004, 0x00010000);
+    assert.equal(
+      await machine.readl(APBX_BASE + 0x000),
+      0,
+      'APBX CH0 RESET bit must auto-clear',
+    );
+    assert.equal(
+      await machine.readl(apbxCh0Cur),
+      0,
+      'APBX CH0 CURCMDAR must be cleared by RESET',
+    );
+    await machine.writel(APBX_BASE + 0x018, 0x00ffffff);
+
+    await machine.writel(APBX_BASE + 0x004, 0x00000001);
+    await writeDescriptorAndKick(apbxCh0Nxt, apbxCh0Sema, apbxDesc);
+    assert.equal(
+      await machine.readl(apbxCh0Cur),
+      0,
+      'APBX CH0 must not launch while FREEZE is set',
+    );
+    await machine.writel(APBX_BASE + 0x008, 0x00000001);
+    assert.equal(
+      await machine.readl(apbxCh0Cur),
+      apbxDesc,
+      'APBX CH0 must resume and load the command when FREEZE is cleared',
+    );
+  });
+}
+
 async function testOnChipRomAndSramMirrorContract() {
   await withMachine(async (machine) => {
     await machine.writel(SRAM_BASE + 0x1234, 0x11223344);
@@ -5568,6 +5710,7 @@ const tests = [
   ['GPMI DATA FIFO contract', testGpmiDataFifoContract],
   ['APBX DMA 64 KiB and AHB error contract', testApbxDma64KAndAhbErrorContract],
   ['DMA CTRL1 and DEVSEL writable mask contract', testDmaCtrl1AndDevselContract],
+  ['DMA reset/freeze/clkgate contract', testDmaResetFreezeClkgateContract],
   ['on-chip ROM and SRAM mirror contract', testOnChipRomAndSramMirrorContract],
   ['DCP register and memcopy contract', testDcpRegisterAndMemcopyContract],
   ['DCP channel register map contract', testDcpChannelRegisterMapContract],

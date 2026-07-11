@@ -118,9 +118,28 @@
 /* VERSION value */
 #define DMA_VERSION             0x01010000  /* v1.1 */
 
-static inline bool stmp3770_dma_enabled(STMP3770DMAState *s)
+static inline bool stmp3770_dma_channel_active_for_ctrl(STMP3770DMAState *s,
+                                                       uint32_t ctrl0,
+                                                       int ch_idx)
 {
-    return (s->ctrl0 & (CTRL0_SFTRST | CTRL0_CLKGATE)) == 0;
+    if ((ctrl0 & (CTRL0_SFTRST | CTRL0_CLKGATE)) != 0) {
+        return false;
+    }
+    if (ctrl0 & (1U << (ch_idx + CTRL0_RESET_CHANNEL_SHIFT))) {
+        return false;
+    }
+    if (ctrl0 & (1U << (ch_idx + CTRL0_FREEZE_CHANNEL_SHIFT))) {
+        return false;
+    }
+    if (!s->is_apbx && (ctrl0 & (1U << (ch_idx + CTRL0_CLKGATE_CHANNEL_SHIFT)))) {
+        return false;
+    }
+    return true;
+}
+
+static inline bool stmp3770_dma_channel_active(STMP3770DMAState *s, int ch_idx)
+{
+    return stmp3770_dma_channel_active_for_ctrl(s, s->ctrl0, ch_idx);
 }
 
 static void stmp3770_dma_update_irq(STMP3770DMAState *s, int ch)
@@ -137,6 +156,42 @@ static void stmp3770_dma_update_all_irqs(STMP3770DMAState *s)
 
     for (i = 0; i < STMP3770_DMA_NUM_CHANNELS; i++) {
         stmp3770_dma_update_irq(s, i);
+    }
+}
+
+static void stmp3770_dma_reset_channel(STMP3770DMAState *s, int ch_idx)
+{
+    STMP3770DMAChannel *ch = &s->ch[ch_idx];
+
+    ch->curcmdar = 0;
+    ch->nxtcmdar = 0;
+    ch->cmd = 0;
+    ch->bar = 0;
+    ch->sema = 0;
+    ch->debug1 = DEBUG1_RD_FIFO_EMPTY | DEBUG1_WR_FIFO_EMPTY |
+                 STATEMACHINE_IDLE;
+    ch->debug2 = 0;
+    ch->loaded_nxtcmdar = 0;
+    ch->loaded_cmd = 0;
+    ch->loaded_bar = 0;
+    ch->num_pio_words = 0;
+}
+
+static void stmp3770_dma_kick_channel(STMP3770DMAState *s, int ch_idx);
+
+static void stmp3770_dma_resume_channels(STMP3770DMAState *s,
+                                         uint32_t old_ctrl0,
+                                         uint32_t new_ctrl0)
+{
+    int i;
+
+    for (i = 0; i < STMP3770_DMA_NUM_CHANNELS; i++) {
+        bool was_active = stmp3770_dma_channel_active_for_ctrl(s, old_ctrl0, i);
+        bool now_active = stmp3770_dma_channel_active_for_ctrl(s, new_ctrl0, i);
+
+        if (!was_active && now_active) {
+            stmp3770_dma_kick_channel(s, i);
+        }
     }
 }
 
@@ -420,6 +475,9 @@ void stmp3770_dma_complete_channel_command(STMP3770DMAState *s, int ch_idx)
     if (!s || ch_idx < 0 || ch_idx >= STMP3770_DMA_NUM_CHANNELS) {
         return;
     }
+    if (!stmp3770_dma_channel_active(s, ch_idx)) {
+        return;
+    }
 
     ch = &s->ch[ch_idx];
     cmd = ch->loaded_cmd;
@@ -450,7 +508,7 @@ static void stmp3770_dma_kick_channel(STMP3770DMAState *s, int ch_idx)
     STMP3770DMAChannel *ch = &s->ch[ch_idx];
     uint32_t phore;
 
-    if (!stmp3770_dma_enabled(s)) {
+    if (!stmp3770_dma_channel_active(s, ch_idx)) {
         return;
     }
 
@@ -589,18 +647,37 @@ static void stmp3770_dma_write(void *opaque, hwaddr offset,
                                CTRL0_CLKGATE_CHANNEL_SHIFT);
         }
         uint32_t wmask = ctrl0_writable & full_mask;
+        uint32_t old_ctrl0 = s->ctrl0;
+        uint32_t new_ctrl0;
         cur = s->ctrl0;
         stmp3770_dma_apply_sct(&cur, (uint32_t)value << shift, sct);
-        s->ctrl0 = (s->ctrl0 & ~wmask) | (cur & wmask);
+        new_ctrl0 = (s->ctrl0 & ~wmask) | (cur & wmask);
         /*
          * Hardware ties CLKGATE to SFTRST: asserting reset automatically
          * gates the clock, so firmware polls CLKGATE after setting SFTRST.
          */
-        if (s->ctrl0 & CTRL0_SFTRST) {
-            s->ctrl0 |= CTRL0_CLKGATE;
+        if (new_ctrl0 & CTRL0_SFTRST) {
+            new_ctrl0 |= CTRL0_CLKGATE;
         } else {
-            s->ctrl0 &= ~CTRL0_CLKGATE;
+            new_ctrl0 &= ~CTRL0_CLKGATE;
         }
+        /* Per-channel RESET is self-clearing: reset the channel and then
+         * drop the RESET bit(s) so firmware sees them as auto-cleared. */
+        {
+            uint32_t reset_bits = (new_ctrl0 >> CTRL0_RESET_CHANNEL_SHIFT) &
+                                  CTRL0_RESET_CHANNEL_MASK;
+            int i;
+
+            for (i = 0; i < STMP3770_DMA_NUM_CHANNELS; i++) {
+                if (reset_bits & (1U << i)) {
+                    stmp3770_dma_reset_channel(s, i);
+                }
+            }
+            new_ctrl0 &= ~(CTRL0_RESET_CHANNEL_MASK <<
+                           CTRL0_RESET_CHANNEL_SHIFT);
+        }
+        s->ctrl0 = new_ctrl0;
+        stmp3770_dma_resume_channels(s, old_ctrl0, new_ctrl0);
         return;
     }
     case REG_CTRL1: {
@@ -683,19 +760,7 @@ static void stmp3770_dma_reset(DeviceState *dev)
     s->devsel = 0;
 
     for (i = 0; i < STMP3770_DMA_NUM_CHANNELS; i++) {
-        STMP3770DMAChannel *ch = &s->ch[i];
-        ch->curcmdar = 0;
-        ch->nxtcmdar = 0;
-        ch->cmd = 0;
-        ch->bar = 0;
-        ch->sema = 0;
-        ch->debug1 = DEBUG1_RD_FIFO_EMPTY | DEBUG1_WR_FIFO_EMPTY |
-                     STATEMACHINE_IDLE;
-        ch->debug2 = 0;
-        ch->loaded_nxtcmdar = 0;
-        ch->loaded_cmd = 0;
-        ch->loaded_bar = 0;
-        ch->num_pio_words = 0;
+        stmp3770_dma_reset_channel(s, i);
     }
 
     stmp3770_dma_update_all_irqs(s);
