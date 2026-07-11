@@ -43,6 +43,8 @@ typedef enum {
 typedef int (*STMP3770DMAHandler)(struct STMP3770DMAState *dma,
                                   int channel, STMP3770DMAEvent event,
                                   void *buf, size_t len, void *opaque);
+typedef void (*STMP3770DMACompletionFn)(struct STMP3770DMAState *dma,
+                                        int channel, void *opaque);
 
 typedef struct STMP3770DMAChannelHandler {
     STMP3770DMAHandler handler;
@@ -87,6 +89,8 @@ struct STMP3770DMAState {
 
     /* Optional per-channel peripheral callbacks */
     STMP3770DMAChannelHandler ch_handler[STMP3770_DMA_NUM_CHANNELS];
+    STMP3770DMACompletionFn completion_cb[STMP3770_DMA_NUM_CHANNELS];
+    void *completion_opaque[STMP3770_DMA_NUM_CHANNELS];
 
     /* true for APBX, false for APBH */
     bool is_apbx;
@@ -97,5 +101,10 @@ void stmp3770_dma_set_channel_handler(STMP3770DMAState *s, int channel,
                                       STMP3770DMAHandler handler, void *opaque);
 void stmp3770_dma_set_channel_sense_capable(STMP3770DMAState *s,
                                             int channel, bool capable);
+void stmp3770_dma_set_channel_completion_callback(STMP3770DMAState *s,
+                                                  int channel,
+                                                  STMP3770DMACompletionFn cb,
+                                                  void *opaque);
+void stmp3770_dma_complete_channel_command(STMP3770DMAState *s, int channel);
 
 #endif /* STMP3770_DMA_H */

@@ -17,6 +17,7 @@
 #include "hw/sysbus.h"
 #include "hw/block/block.h"
 #include "hw/dma/stmp3770_dma.h"
+#include "qemu/timer.h"
 
 #define TYPE_STMP3770_GPMI "stmp3770-gpmi"
 #define TYPE_STMP3770_BCH  "stmp3770-bch"
@@ -96,7 +97,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(STMP3770BCHState, STMP3770_BCH)
 
 /* DEBUG status bits */
 #define GPMI_DEBUG_READY_SHIFT     28
+#define GPMI_DEBUG_WAIT_END_SHIFT  24
 #define GPMI_DEBUG_SENSE_SHIFT     20
+#define GPMI_DEBUG_CMD_END_SHIFT   12
+#define GPMI_DEBUG_BUSY            (1U << 7)
 
 /* ECCCTRL bits */
 #define GPMI_ECCCTRL_HANDLE_SHIFT   16
@@ -194,6 +198,19 @@ typedef enum {
     GPMI_STORAGE_LAYOUT_INTERLEAVED_OOB = 1,
 } STMP3770GPMIStorageLayout;
 
+typedef struct STMP3770GPMIWaitState {
+    bool pending;
+    bool timeout;
+    bool dma_blocked;
+    unsigned int cs;
+    int dma_channel;
+} STMP3770GPMIWaitState;
+
+typedef struct STMP3770GPMITimerCtx {
+    STMP3770GPMIState *s;
+    unsigned int channel;
+} STMP3770GPMITimerCtx;
+
 struct STMP3770GPMIState {
     SysBusDevice parent_obj;
 
@@ -258,6 +275,12 @@ struct STMP3770GPMIState {
     STMP3770DMAState *dma;
     int dma_channel_base;
     int active_dma_channel;
+    uint32_t gpmi_clk_hz;
+    uint8_t ready_state[STMP3770_GPMI_NUM_CS];
+    STMP3770GPMIWaitState wait[STMP3770_GPMI_NUM_CS];
+    QEMUTimer *wait_timer[STMP3770_GPMI_NUM_CS];
+    STMP3770GPMITimerCtx wait_timer_ctx[STMP3770_GPMI_NUM_CS];
+    int64_t wait_deadline_ns[STMP3770_GPMI_NUM_CS];
 
     /* BCH back-pointer for ECC completion IRQ/status */
     STMP3770BCHState *bch;
@@ -285,5 +308,6 @@ struct STMP3770BCHState {
 void stmp3770_gpmi_set_dma(STMP3770GPMIState *s, STMP3770DMAState *dma,
                            int channel_base);
 void stmp3770_gpmi_set_bch(STMP3770GPMIState *s, STMP3770BCHState *bch);
+void stmp3770_gpmi_set_gpmi_rate(STMP3770GPMIState *s, uint32_t gpmi_hz);
 
 #endif /* STMP3770_GPMI_H */

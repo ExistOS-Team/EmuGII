@@ -152,6 +152,18 @@ void stmp3770_dma_set_channel_sense_capable(STMP3770DMAState *s,
     s->ch_handler[channel].sense_capable = capable;
 }
 
+void stmp3770_dma_set_channel_completion_callback(STMP3770DMAState *s,
+                                                  int channel,
+                                                  STMP3770DMACompletionFn cb,
+                                                  void *opaque)
+{
+    if (channel < 0 || channel >= STMP3770_DMA_NUM_CHANNELS) {
+        return;
+    }
+    s->completion_cb[channel] = cb;
+    s->completion_opaque[channel] = opaque;
+}
+
 /*
  * Load a command descriptor from guest memory.  Returns false if the read
  * fails (bad address).  On success, the loaded_* fields of the channel are
@@ -257,6 +269,7 @@ static void stmp3770_dma_run_channel(STMP3770DMAState *s, int ch_idx)
     bool irq_on_cmplt = (cmd & CMD_IRQONCMPLT) != 0;
     bool decrement_sema = (cmd & CMD_SEMAPHORE) != 0;
     bool chain = (cmd & CMD_CHAIN) != 0;
+    bool wait4endcmd = (cmd & CMD_WAIT4ENDCMD) != 0;
     bool sense_branch = false;
     uint32_t phore = (ch->sema >> SEMA_PHORE_SHIFT) & SEMA_PHORE_MASK;
 
@@ -359,6 +372,11 @@ static void stmp3770_dma_run_channel(STMP3770DMAState *s, int ch_idx)
         ch->nxtcmdar = 0;
     }
 
+    if (wait4endcmd && s->completion_cb[ch_idx]) {
+        s->completion_cb[ch_idx](s, ch_idx, s->completion_opaque[ch_idx]);
+        return;
+    }
+
     /* Update semaphore after the command completes. */
     if (decrement_sema) {
         if (phore > 0) {
@@ -378,6 +396,43 @@ static void stmp3770_dma_run_channel(STMP3770DMAState *s, int ch_idx)
         if (stmp3770_dma_load_command(s, ch_idx)) {
             stmp3770_dma_run_channel(s, ch_idx);
         }
+    }
+}
+
+void stmp3770_dma_complete_channel_command(STMP3770DMAState *s, int ch_idx)
+{
+    STMP3770DMAChannel *ch;
+    uint32_t cmd;
+    bool irq_on_cmplt;
+    bool decrement_sema;
+    bool chain;
+    uint32_t phore;
+
+    if (!s || ch_idx < 0 || ch_idx >= STMP3770_DMA_NUM_CHANNELS) {
+        return;
+    }
+
+    ch = &s->ch[ch_idx];
+    cmd = ch->loaded_cmd;
+    irq_on_cmplt = (cmd & CMD_IRQONCMPLT) != 0;
+    decrement_sema = (cmd & CMD_SEMAPHORE) != 0;
+    chain = (cmd & CMD_CHAIN) != 0;
+    phore = (ch->sema >> SEMA_PHORE_SHIFT) & SEMA_PHORE_MASK;
+
+    if (decrement_sema) {
+        if (phore > 0) {
+            phore--;
+        }
+        ch->sema = (phore << SEMA_PHORE_SHIFT);
+    }
+
+    if (irq_on_cmplt) {
+        s->ctrl1 |= (1U << ch_idx);
+        stmp3770_dma_update_irq(s, ch_idx);
+    }
+
+    if (chain && stmp3770_dma_load_command(s, ch_idx)) {
+        stmp3770_dma_run_channel(s, ch_idx);
     }
 }
 

@@ -211,6 +211,12 @@ class QTestMachine {
     assert.match(resp, /^OK /, `Unexpected clock_step response: ${resp}`);
   }
 
+  async setIrqIn(qomPath, name, num, level) {
+    const gpioName = name ?? 'unnamed-gpio-in';
+    const resp = await this.cmd(`set_irq_in ${qomPath} ${gpioName} ${num} ${level}`);
+    assert.equal(resp, 'OK', `Unexpected set_irq_in response: ${resp}`);
+  }
+
   async close() {
     this.socket.destroy();
     if (this.proc.exitCode !== null) {
@@ -2262,6 +2268,142 @@ async function testGpmiCompareSenseContract() {
       await runSenseDescriptor(),
       errorDescriptor,
       'APBH channel 4 must branch on its own GPMI SENSE0 result',
+    );
+  });
+}
+
+async function testGpmiWaitForReadyContract() {
+  await withMachine(async (machine) => {
+    const apbhChannel4CurrentCommand = APBH_BASE + 0x200;
+    const apbhChannel4NextCommand = APBH_BASE + 0x210;
+    const apbhChannel4Semaphore = APBH_BASE + 0x240;
+    const waitDescriptor = SRAM_BASE + 0x3100;
+    const doneDescriptor = SRAM_BASE + 0x3140;
+    const timeoutSenseDescriptor = SRAM_BASE + 0x3180;
+    const timeoutSuccessDescriptor = SRAM_BASE + 0x31c0;
+    const timeoutErrorDescriptor = SRAM_BASE + 0x3200;
+    const noDmaXfer = 0;
+    const dmaSense = 3;
+    const commandWaitForReady = 3 << 24;
+    const wordLength8Bit = 1 << 23;
+    const runBit = 1 << 29;
+    const chainBit = 1 << 2;
+    const irqOnCompleteBit = 1 << 3;
+    const nandWaitForReadyBit = 1 << 5;
+    const semaphoreBit = 1 << 6;
+    const wait4EndCmdBit = 1 << 7;
+    const onePioWord = 1 << 12;
+    const dmaTerminal = semaphoreBit | irqOnCompleteBit;
+
+    const writeDescriptor = async (address, next, command, bar, ctrl0 = undefined) => {
+      await machine.writel(address + 0x00, next);
+      await machine.writel(address + 0x04, command);
+      await machine.writel(address + 0x08, bar);
+      if (ctrl0 !== undefined) {
+        await machine.writel(address + 0x0c, ctrl0);
+      }
+    };
+
+    const waitCtrl0 = runBit | commandWaitForReady | wordLength8Bit;
+
+    await machine.writel(CLKCTRL_BASE + 0x080, 0x00000001);
+    await machine.writel(GPMI_BASE + 0x000, 0);
+    await machine.writel(APBH_BASE + 0x008, 0xc0000000);
+    await machine.setIrqIn('/machine/soc/gpmi', 'rdy-busy', 0, 0);
+
+    assert.equal(
+      await machine.readl(GPMI_BASE + 0x0c0),
+      0,
+      'GPMI DEBUG reset value must clear READY, WAIT_FOR_READY_END, SENSE, and CMD_END views',
+    );
+
+    await machine.writel(GPMI_BASE + 0x000, waitCtrl0);
+    assert.equal(
+      (await machine.readl(GPMI_BASE + 0x0c0)) & ((1 << 24) | (1 << 12)),
+      0,
+      'PIO WAIT_FOR_READY must not complete immediately before the ready input changes',
+    );
+    await machine.setIrqIn('/machine/soc/gpmi', 'rdy-busy', 0, 1);
+    assert.notEqual(
+      (await machine.readl(GPMI_BASE + 0x0c0)) & (1 << 28),
+      0,
+      'GPMI READY0 view must track the normalized ready input state',
+    );
+    assert.notEqual(
+      (await machine.readl(GPMI_BASE + 0x0c0)) & ((1 << 24) | (1 << 12)),
+      0,
+      'PIO WAIT_FOR_READY must toggle WAIT_FOR_READY_END0 and CMD_END0 when ready arrives',
+    );
+    await machine.setIrqIn('/machine/soc/gpmi', 'rdy-busy', 0, 0);
+
+    await writeDescriptor(
+      waitDescriptor,
+      doneDescriptor,
+      onePioWord | wait4EndCmdBit | nandWaitForReadyBit | chainBit | noDmaXfer,
+      0,
+      commandWaitForReady | wordLength8Bit,
+    );
+    await writeDescriptor(doneDescriptor, 0, dmaTerminal, 0);
+
+    await machine.writel(apbhChannel4NextCommand, waitDescriptor);
+    await machine.writel(apbhChannel4Semaphore, 1);
+    assert.equal(
+      await machine.readl(apbhChannel4CurrentCommand),
+      waitDescriptor,
+      'APBH WAIT4ENDCMD + NANDWAIT4READY must hold the current descriptor until ready/endcmd occur',
+    );
+    assert.equal(
+      await machine.readl(apbhChannel4Semaphore),
+      0x00010001,
+      'APBH semaphore must remain non-zero while WAIT_FOR_READY is still pending',
+    );
+    await machine.setIrqIn('/machine/soc/gpmi', 'rdy-busy', 0, 1);
+    assert.equal(
+      await machine.readl(apbhChannel4CurrentCommand),
+      doneDescriptor,
+      'APBH WAIT_FOR_READY chain must resume at the next descriptor after ready/endcmd occur',
+    );
+    assert.equal(
+      await machine.readl(apbhChannel4Semaphore),
+      0,
+      'APBH completion path must consume the terminal semaphore after WAIT_FOR_READY finishes',
+    );
+    await machine.setIrqIn('/machine/soc/gpmi', 'rdy-busy', 0, 0);
+
+    await machine.writel(GPMI_BASE + 0x080, 0x00010000);
+    await machine.writel(GPMI_BASE + 0x004, 1 << 27);
+    await machine.writel(GPMI_BASE + 0x000, waitCtrl0);
+    await machine.clockStep(200_000);
+    assert.notEqual(
+      (await machine.readl(GPMI_BASE + 0x060)) & (1 << 9),
+      0,
+      'GPMI CTRL1.TIMEOUT_IRQ must latch when WAIT_FOR_READY times out',
+    );
+    assert.notEqual(
+      (await machine.readl(GPMI_BASE + 0x0b0)) & (1 << 8),
+      0,
+      'GPMI STAT.RDY_TIMEOUT0 must latch when channel 0 WAIT_FOR_READY times out',
+    );
+    assert.notEqual(
+      (await machine.readl(GPMI_BASE + 0x0b0)) & 1,
+      0,
+      'GPMI WAIT_FOR_READY timeout must report DEV0_ERROR',
+    );
+    assert.notEqual(
+      (await machine.readl(GPMI_BASE + 0x0c0)) & (1 << 20),
+      0,
+      'GPMI WAIT_FOR_READY timeout must set SENSE0',
+    );
+
+    await writeDescriptor(timeoutSenseDescriptor, timeoutSuccessDescriptor, dmaSense, timeoutErrorDescriptor);
+    await writeDescriptor(timeoutSuccessDescriptor, 0, dmaTerminal, 0);
+    await writeDescriptor(timeoutErrorDescriptor, 0, dmaTerminal, 0);
+    await machine.writel(apbhChannel4NextCommand, timeoutSenseDescriptor);
+    await machine.writel(apbhChannel4Semaphore, 1);
+    assert.equal(
+      await machine.readl(apbhChannel4CurrentCommand),
+      timeoutErrorDescriptor,
+      'APBH DMA_SENSE must branch to BAR after WAIT_FOR_READY timeout sets the GPMI sense flop',
     );
   });
 }
@@ -4336,6 +4478,7 @@ const tests = [
   ['GPMI CTRL1 contract', testGpmiCtrl1Contract],
   ['GPMI ECC register contract', testGpmiEccRegisterContract],
   ['GPMI compare and DMA sense contract', testGpmiCompareSenseContract],
+  ['GPMI WAIT_FOR_READY contract', testGpmiWaitForReadyContract],
   ['ECC8 completion result contract', testEcc8CompletionResultContract],
   ['ECC8 register contract', testEcc8RegisterContract],
   ['GPMI DATA FIFO contract', testGpmiDataFifoContract],
@@ -4383,9 +4526,19 @@ const tests = [
   ['OCOTP lock and shadow contract', testOcotpLockAndShadowContract],
 ];
 
+const filter = process.env.EMUGII_QTEST_FILTER;
+const selectedTests = filter
+  ? tests.filter(([name]) => name.includes(filter))
+  : tests;
+
+if (filter && selectedTests.length === 0) {
+  console.error(`FAIL No qtest contract matched filter: ${filter}`);
+  process.exit(1);
+}
+
 let failures = 0;
 
-for (const [name, fn] of tests) {
+for (const [name, fn] of selectedTests) {
   try {
     await fn();
     console.log(`PASS ${name}`);

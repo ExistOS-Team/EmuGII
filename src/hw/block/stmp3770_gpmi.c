@@ -60,6 +60,214 @@ static void gpmi_apply_sct(uint32_t *reg, uint32_t value, int sct)
     }
 }
 
+static void gpmi_update_irq(STMP3770GPMIState *s);
+
+static bool gpmi_ready_active(STMP3770GPMIState *s, unsigned int cs)
+{
+    bool level;
+
+    if (cs >= STMP3770_GPMI_NUM_CS) {
+        return false;
+    }
+
+    level = s->ready_state[cs] != 0;
+    if (cs < 2 && !(s->ctrl1 & GPMI_CTRL1_ATA_IRQRDY_POLARITY)) {
+        level = !level;
+    }
+    return level;
+}
+
+static void gpmi_update_ready_view(STMP3770GPMIState *s, unsigned int cs)
+{
+    uint32_t bit;
+
+    if (cs >= STMP3770_GPMI_NUM_CS) {
+        return;
+    }
+
+    bit = 1U << (GPMI_DEBUG_READY_SHIFT + cs);
+    if (gpmi_ready_active(s, cs)) {
+        s->debug |= bit;
+    } else {
+        s->debug &= ~bit;
+    }
+}
+
+static void gpmi_update_ready_views(STMP3770GPMIState *s)
+{
+    unsigned int cs;
+
+    for (cs = 0; cs < STMP3770_GPMI_NUM_CS; cs++) {
+        gpmi_update_ready_view(s, cs);
+    }
+}
+
+static void gpmi_update_busy(STMP3770GPMIState *s)
+{
+    unsigned int channel;
+    bool pending = false;
+
+    for (channel = 0; channel < STMP3770_GPMI_NUM_CS; channel++) {
+        if (s->wait[channel].pending) {
+            pending = true;
+            break;
+        }
+    }
+
+    if (pending) {
+        s->debug |= GPMI_DEBUG_BUSY;
+    } else {
+        s->debug &= ~GPMI_DEBUG_BUSY;
+    }
+}
+
+static void gpmi_cancel_wait_timer(STMP3770GPMIState *s, unsigned int channel)
+{
+    if (channel >= STMP3770_GPMI_NUM_CS) {
+        return;
+    }
+
+    if (s->wait_timer[channel]) {
+        timer_del(s->wait_timer[channel]);
+    }
+    s->wait_deadline_ns[channel] = 0;
+}
+
+static void gpmi_schedule_wait_timer(STMP3770GPMIState *s,
+                                     unsigned int channel)
+{
+    uint32_t timeout_cycles;
+    uint64_t timeout_ns;
+
+    if (channel >= STMP3770_GPMI_NUM_CS || !s->wait[channel].pending) {
+        return;
+    }
+
+    gpmi_cancel_wait_timer(s, channel);
+
+    timeout_cycles = s->timing1 >> 16;
+    if (timeout_cycles == 0 || s->gpmi_clk_hz == 0) {
+        return;
+    }
+
+    timeout_ns = (uint64_t)timeout_cycles * 4096ULL * 1000000000ULL;
+    timeout_ns = (timeout_ns + s->gpmi_clk_hz - 1) / s->gpmi_clk_hz;
+    if (timeout_ns == 0) {
+        timeout_ns = 1;
+    }
+
+    s->wait_deadline_ns[channel] =
+        qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + timeout_ns;
+    timer_mod(s->wait_timer[channel], s->wait_deadline_ns[channel]);
+}
+
+static void gpmi_complete_wait_for_ready(STMP3770GPMIState *s,
+                                         unsigned int channel,
+                                         bool timeout)
+{
+    STMP3770GPMIWaitState *wait;
+    unsigned int cs;
+    int dma_channel;
+
+    if (channel >= STMP3770_GPMI_NUM_CS) {
+        return;
+    }
+
+    wait = &s->wait[channel];
+    if (!wait->pending) {
+        return;
+    }
+
+    cs = wait->cs;
+    dma_channel = wait->dma_channel;
+
+    wait->pending = false;
+    wait->timeout = timeout;
+    gpmi_cancel_wait_timer(s, channel);
+    s->nand_state = NAND_STATE_IDLE;
+
+    if (timeout) {
+        s->ctrl1 |= GPMI_CTRL1_TIMEOUT_IRQ;
+        s->stat |= 1U << cs;
+        s->stat |= 1U << (GPMI_STAT_RDY_TIMEOUT_SHIFT + cs);
+        s->debug |= 1U << (GPMI_DEBUG_SENSE_SHIFT + channel);
+    } else {
+        s->stat &= ~(1U << cs);
+        s->stat &= ~(1U << (GPMI_STAT_RDY_TIMEOUT_SHIFT + cs));
+        s->debug &= ~(1U << (GPMI_DEBUG_SENSE_SHIFT + channel));
+    }
+
+    s->debug ^= 1U << (GPMI_DEBUG_WAIT_END_SHIFT + channel);
+    s->debug ^= 1U << (GPMI_DEBUG_CMD_END_SHIFT + channel);
+    gpmi_update_busy(s);
+    gpmi_update_irq(s);
+
+    if (wait->dma_blocked && dma_channel >= 0 && s->dma) {
+        wait->dma_blocked = false;
+        wait->dma_channel = -1;
+        stmp3770_dma_complete_channel_command(s->dma, dma_channel);
+    }
+}
+
+static void gpmi_check_wait_ready(STMP3770GPMIState *s, unsigned int cs)
+{
+    unsigned int channel;
+
+    if (!gpmi_ready_active(s, cs)) {
+        return;
+    }
+
+    for (channel = 0; channel < STMP3770_GPMI_NUM_CS; channel++) {
+        if (s->wait[channel].pending && s->wait[channel].cs == cs) {
+            gpmi_complete_wait_for_ready(s, channel, false);
+        }
+    }
+}
+
+static void gpmi_check_abort_requests(STMP3770GPMIState *s)
+{
+    unsigned int channel;
+    uint32_t abort_mask =
+        (s->ctrl1 & GPMI_CTRL1_ABORT_WAIT_FOR_READY_MASK) >> 4;
+
+    for (channel = 0; channel < STMP3770_GPMI_NUM_CS; channel++) {
+        if ((abort_mask & (1U << channel)) && s->wait[channel].pending) {
+            gpmi_complete_wait_for_ready(s, channel, false);
+        }
+    }
+}
+
+static void gpmi_start_wait_for_ready(STMP3770GPMIState *s, unsigned int cs,
+                                      unsigned int channel)
+{
+    STMP3770GPMIWaitState *wait;
+
+    if (cs >= STMP3770_GPMI_NUM_CS || channel >= STMP3770_GPMI_NUM_CS) {
+        return;
+    }
+
+    wait = &s->wait[channel];
+    gpmi_cancel_wait_timer(s, channel);
+    wait->pending = true;
+    wait->timeout = false;
+    wait->dma_blocked = false;
+    wait->cs = cs;
+    wait->dma_channel = s->active_dma_channel >= 0 ?
+                        s->dma_channel_base + s->active_dma_channel : -1;
+    s->nand_state = NAND_STATE_WAIT_READY;
+    gpmi_update_busy(s);
+
+    if (gpmi_ready_active(s, cs)) {
+        gpmi_complete_wait_for_ready(s, channel, false);
+        return;
+    }
+
+    gpmi_check_abort_requests(s);
+    if (wait->pending) {
+        gpmi_schedule_wait_timer(s, channel);
+    }
+}
+
 static void gpmi_update_irq(STMP3770GPMIState *s)
 {
     bool pending = false;
@@ -171,6 +379,8 @@ static void gpmi_data_write(STMP3770GPMIState *s, uint32_t value,
 
 static void gpmi_write_ctrl1(STMP3770GPMIState *s, uint32_t value, int sct)
 {
+    unsigned int cs;
+
     switch (sct) {
     case 0:
         /* DEV_IRQ and TIMEOUT_IRQ are hardware status bits with W0C access. */
@@ -190,7 +400,32 @@ static void gpmi_write_ctrl1(STMP3770GPMIState *s, uint32_t value, int sct)
         break;
     }
 
+    gpmi_update_ready_views(s);
+    for (cs = 0; cs < STMP3770_GPMI_NUM_CS; cs++) {
+        gpmi_check_wait_ready(s, cs);
+    }
+    gpmi_check_abort_requests(s);
     gpmi_update_irq(s);
+}
+
+static void gpmi_wait_timer_cb(void *opaque)
+{
+    STMP3770GPMITimerCtx *ctx = opaque;
+
+    gpmi_complete_wait_for_ready(ctx->s, ctx->channel, true);
+}
+
+static void stmp3770_gpmi_rdy_busy_set(void *opaque, int n, int level)
+{
+    STMP3770GPMIState *s = STMP3770_GPMI(opaque);
+
+    if (n < 0 || n >= STMP3770_GPMI_NUM_CS) {
+        return;
+    }
+
+    s->ready_state[n] = !!level;
+    gpmi_update_ready_view(s, n);
+    gpmi_check_wait_ready(s, n);
 }
 
 static void bch_update_irq(STMP3770BCHState *s)
@@ -316,12 +551,6 @@ static void gpmi_nand_reset_state(STMP3770GPMIState *s)
     s->data_ptr = 0;
     s->data_dir_write = false;
     s->write_cmd_sent = false;
-}
-
-static void gpmi_update_rdy_timeout(STMP3770GPMIState *s)
-{
-    /* For MVP, all chip selects are always ready */
-    s->stat &= ~(GPMI_STAT_RDY_TIMEOUT_MASK << GPMI_STAT_RDY_TIMEOUT_SHIFT);
 }
 
 static void gpmi_decode_address(STMP3770GPMIState *s)
@@ -895,8 +1124,7 @@ static void gpmi_execute_command(STMP3770GPMIState *s)
         break;
 
     case GPMI_COMMAND_MODE_WAIT_FOR_READY:
-        /* MVP: NAND is always ready immediately */
-        s->nand_state = NAND_STATE_IDLE;
+        gpmi_start_wait_for_ready(s, cs, channel);
         break;
 
     case GPMI_COMMAND_MODE_READ_AND_COMPARE:
@@ -918,8 +1146,8 @@ static void gpmi_execute_command(STMP3770GPMIState *s)
         break;
     }
 
-    s->debug |= 1U << (GPMI_DEBUG_READY_SHIFT + cs);
-    gpmi_update_rdy_timeout(s);
+    gpmi_update_ready_views(s);
+    gpmi_update_busy(s);
 
     /* Trigger DMA completion interrupt if requested */
     if (s->dma) {
@@ -1094,6 +1322,7 @@ static bool gpmi_dma_pio_starts_command(uint32_t ctrl0)
 static void gpmi_reset(DeviceState *dev)
 {
     STMP3770GPMIState *s = STMP3770_GPMI(dev);
+    unsigned int channel;
 
     s->ctrl0 = GPMI_CTRL0_SFTRST | GPMI_CTRL0_CLKGATE;
     s->compare = 0;
@@ -1108,10 +1337,20 @@ static void gpmi_reset(DeviceState *dev)
     s->stat = GPMI_STAT_PRESENT | GPMI_STAT_FIFO_EMPTY;
     s->debug = 0;
     s->active_dma_channel = -1;
+    memset(s->ready_state, 0, sizeof(s->ready_state));
+    for (channel = 0; channel < STMP3770_GPMI_NUM_CS; channel++) {
+        s->wait[channel].pending = false;
+        s->wait[channel].timeout = false;
+        s->wait[channel].dma_blocked = false;
+        s->wait[channel].cs = channel;
+        s->wait[channel].dma_channel = -1;
+        gpmi_cancel_wait_timer(s, channel);
+    }
     gpmi_fifo_clear(s);
 
     gpmi_nand_reset_state(s);
-    gpmi_update_rdy_timeout(s);
+    gpmi_update_ready_views(s);
+    gpmi_update_busy(s);
     gpmi_update_irq(s);
 
     /* Progress counters are NOT reset on soft reset so they accumulate
@@ -1122,17 +1361,30 @@ static void gpmi_init(Object *obj)
 {
     STMP3770GPMIState *s = STMP3770_GPMI(obj);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+    unsigned int channel;
 
     memory_region_init_io(&s->iomem, obj, &gpmi_ops, s,
                           TYPE_STMP3770_GPMI, 0x2000);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
+    qdev_init_gpio_in_named(DEVICE(obj), stmp3770_gpmi_rdy_busy_set,
+                            "rdy-busy", STMP3770_GPMI_NUM_CS);
 
     /* Initialize progress counters */
     s->page_read_cnt = 0;
     s->page_write_cnt = 0;
     s->block_erase_cnt = 0;
     s->ecc_complete_cnt = 0;
+
+    for (channel = 0; channel < STMP3770_GPMI_NUM_CS; channel++) {
+        s->wait_timer_ctx[channel].s = s;
+        s->wait_timer_ctx[channel].channel = channel;
+        s->wait_timer[channel] = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                              gpmi_wait_timer_cb,
+                                              &s->wait_timer_ctx[channel]);
+        s->wait[channel].dma_blocked = false;
+        s->wait[channel].dma_channel = -1;
+    }
 }
 
 static void gpmi_realize(DeviceState *dev, Error **errp)
@@ -1216,9 +1468,16 @@ static void gpmi_realize(DeviceState *dev, Error **errp)
 static void gpmi_unrealize(DeviceState *dev)
 {
     STMP3770GPMIState *s = STMP3770_GPMI(dev);
+    unsigned int channel;
 
     g_free(s->page_buf);
     s->page_buf = NULL;
+
+    for (channel = 0; channel < STMP3770_GPMI_NUM_CS; channel++) {
+        gpmi_cancel_wait_timer(s, channel);
+        timer_free(s->wait_timer[channel]);
+        s->wait_timer[channel] = NULL;
+    }
 
     if (s->blk) {
         s->storage = NULL;
@@ -1338,6 +1597,29 @@ static int stmp3770_gpmi_dma_handler(STMP3770DMAState *dma,
     return 0;
 }
 
+static void stmp3770_gpmi_dma_completion_cb(STMP3770DMAState *dma,
+                                            int channel, void *opaque)
+{
+    STMP3770GPMIState *s = STMP3770_GPMI(opaque);
+    int gpmi_channel = channel - s->dma_channel_base;
+
+    if (gpmi_channel < 0 || gpmi_channel >= STMP3770_GPMI_NUM_CS) {
+        return;
+    }
+
+    if (s->wait[gpmi_channel].pending) {
+        s->wait[gpmi_channel].dma_blocked = true;
+        return;
+    }
+
+    if (s->wait[gpmi_channel].dma_channel == channel) {
+        s->wait[gpmi_channel].dma_channel = -1;
+        s->wait[gpmi_channel].dma_blocked = false;
+    }
+
+    stmp3770_dma_complete_channel_command(dma, channel);
+}
+
 void stmp3770_gpmi_set_dma(STMP3770GPMIState *s, STMP3770DMAState *dma,
                            int channel_base)
 {
@@ -1354,12 +1636,26 @@ void stmp3770_gpmi_set_dma(STMP3770GPMIState *s, STMP3770DMAState *dma,
         stmp3770_dma_set_channel_handler(dma, channel_base + i,
                                          stmp3770_gpmi_dma_handler, s);
         stmp3770_dma_set_channel_sense_capable(dma, channel_base + i, true);
+        stmp3770_dma_set_channel_completion_callback(
+            dma, channel_base + i, stmp3770_gpmi_dma_completion_cb, s);
     }
 }
 
 void stmp3770_gpmi_set_bch(STMP3770GPMIState *s, STMP3770BCHState *bch)
 {
     s->bch = bch;
+}
+
+void stmp3770_gpmi_set_gpmi_rate(STMP3770GPMIState *s, uint32_t gpmi_hz)
+{
+    unsigned int channel;
+
+    s->gpmi_clk_hz = gpmi_hz;
+    for (channel = 0; channel < STMP3770_GPMI_NUM_CS; channel++) {
+        if (s->wait[channel].pending && s->wait_deadline_ns[channel] == 0) {
+            gpmi_schedule_wait_timer(s, channel);
+        }
+    }
 }
 
 static int gpmi_post_load(void *opaque, int version_id)
@@ -1384,6 +1680,8 @@ static int gpmi_post_load(void *opaque, int version_id)
     }
     s->fifo_count = MIN(s->fifo_count, ARRAY_SIZE(s->data_fifo));
     gpmi_update_fifo_status(s);
+    gpmi_update_ready_views(s);
+    gpmi_update_busy(s);
     gpmi_update_irq(s);
     return 0;
 }

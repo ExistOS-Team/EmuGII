@@ -192,6 +192,11 @@ static void stmp3770_dig_reset(void *opaque)
     device_cold_reset(DEVICE(s));
 }
 
+static void stmp3770_gpmi_rate_update(void *opaque, uint32_t gpmi_hz)
+{
+    stmp3770_gpmi_set_gpmi_rate(STMP3770_GPMI(opaque), gpmi_hz);
+}
+
 static void stmp3770_init(Object *obj)
 {
     STMP3770State *s = STMP3770(obj);
@@ -481,6 +486,9 @@ static void stmp3770_realize(DeviceState *dev, Error **errp)
 
     /* Connect GPMI to APBH DMA channels 4-7 */
     stmp3770_gpmi_set_dma(s->gpmi, s->apbh_dma, 4);
+    stmp3770_clkctrl_set_gpmi_rate_callback(s->clkctrl,
+                                            stmp3770_gpmi_rate_update,
+                                            s->gpmi);
 
     /* Connect GPMI DMA completion IRQ */
     sysbus_connect_irq(SYS_BUS_DEVICE(s->gpmi), 0,
