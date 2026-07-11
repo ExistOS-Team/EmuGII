@@ -91,6 +91,7 @@
 #define PERSISTENT0_ALARM_WAKE_EN   (1U << 1)
 #define PERSISTENT0_CLOCKSOURCE     (1U << 0)
 #define PERSISTENT0_WRITABLE_MASK   0xFFFFFFFFU
+#define PERSISTENT1_WRITABLE_MASK   0x0000000FU
 #define PERSISTENT0_MSEC_RES_SHIFT   8
 #define PERSISTENT0_MSEC_RES_MASK    0x1F
 
@@ -450,7 +451,8 @@ static void stmp3770_rtc_write(void *opaque, hwaddr offset,
                 s->persistent[0] |= PERSISTENT0_LCK_SECS;
             }
         } else {
-            stmp3770_rtc_apply_write(&s->persistent[idx], 0xFFFFFFFF,
+            stmp3770_rtc_apply_write(&s->persistent[idx],
+                                     idx == 1 ? PERSISTENT1_WRITABLE_MASK : 0xFFFFFFFF,
                                      (uint32_t)value, sct, offset, size);
         }
         stmp3770_rtc_queue_shadow_write(s, idx);

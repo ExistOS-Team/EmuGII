@@ -421,7 +421,7 @@ async function testRtcAnalogStateSurvivesChipReset() {
     await machine.clockStep(3_000_000);
     await machine.writel(RTC_BASE + 0x030, 0x12345678);
     await machine.writel(RTC_BASE + 0x040, 0x87654321);
-    await machine.writel(RTC_BASE + 0x070, 0xdeadbeef);
+    await machine.writel(RTC_BASE + 0x070, 0x0000000f);
     await machine.writel(RTC_BASE + 0x064, 0x00000008);
     await machine.clockStep(3_000_000);
 
@@ -451,7 +451,7 @@ async function testRtcAnalogStateSurvivesChipReset() {
     );
     assert.equal(
       await machine.readl(RTC_BASE + 0x070),
-      0xdeadbeef,
+      0x0000000f,
       'RTC PERSISTENT1 analog state must survive CLKCTRL RESET.CHIP and refresh the shadow register',
     );
   });
@@ -473,6 +473,25 @@ async function testRtcAnalogSecondsRunWhileDigitalClockGated() {
       await machine.readl(RTC_BASE + 0x030),
       1,
       'RTC analog seconds must continue while the digital clock is gated and refresh after it is enabled',
+    );
+  });
+}
+
+async function testRtcPersistent1WriteMaskContract() {
+  await withMachine(async (machine) => {
+    await machine.clockStep(3_000_000);
+    await machine.writel(RTC_BASE + 0x070, 0xffffffff);
+    assert.equal(
+      await machine.readl(RTC_BASE + 0x070),
+      0x0000000f,
+      'RTC PERSISTENT1 must ignore writes to reserved bits 31:4',
+    );
+
+    await machine.writel(RTC_BASE + 0x070, 0xdeadbeef);
+    assert.equal(
+      await machine.readl(RTC_BASE + 0x070),
+      0x0000000f,
+      'RTC PERSISTENT1 must only retain writable bits 3:0',
     );
   });
 }
@@ -4573,6 +4592,7 @@ const tests = [
   ['RTC alarm wake contract', testRtcAlarmWakeContract],
   ['RTC suppress copy-to-analog contract', testRtcSuppressCopyToAnalogContract],
   ['RTC analog state survives chip reset', testRtcAnalogStateSurvivesChipReset],
+  ['RTC PERSISTENT1 write mask contract', testRtcPersistent1WriteMaskContract],
   ['RTC analog seconds run while digital clock gated', testRtcAnalogSecondsRunWhileDigitalClockGated],
   ['RTC millisecond resolution contract', testRtcMsecResolutionContract],
   ['TIMROT tick and update contract', testTimrotTickAndUpdateContract],
