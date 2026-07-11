@@ -2354,7 +2354,7 @@ async function testGpmiWaitForReadyContract() {
     );
     assert.equal(
       await machine.readl(apbhChannel4Semaphore),
-      0x00010001,
+      0x00010000,
       'APBH semaphore must remain non-zero while WAIT_FOR_READY is still pending',
     );
     await machine.setIrqIn('/machine/soc/gpmi', 'rdy-busy', 0, 1);

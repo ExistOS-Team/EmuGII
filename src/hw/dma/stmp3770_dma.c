@@ -513,16 +513,13 @@ static uint64_t stmp3770_dma_read(void *opaque, hwaddr offset, unsigned size)
         if (base == REG_CH_SEMA(ch_idx)) {
             /*
              * SEMA register layout (STMP3770/i.MX23):
-             * - Write: bit[7:0] = INCREMENT_SEMA (value to add to PHORE)
-             * - Read:  bit[7:0] = PHORE (current semaphore count)
-             *          bit[23:16] = PHORE (mirrored, legacy field)
-             *
-             * Firmware polls INCREMENT_SEMA bit[7:0] to check if DMA is done
-             * (waits for it to decrement to 0). We must return PHORE in both
-             * bit[7:0] AND bit[23:16] on read.
+             * - 31:24 RSVD RO
+             * - 23:16 PHORE RO (current semaphore count)
+             * - 15:8  RSVD RO
+             * - 7:0   INCREMENT_SEMA (write-only, reads back as 0)
              */
             uint32_t phore = (ch->sema >> SEMA_PHORE_SHIFT) & SEMA_PHORE_MASK;
-            uint32_t sema_read = (phore << SEMA_PHORE_SHIFT) | (phore << SEMA_INCREMENT_SHIFT);
+            uint32_t sema_read = phore << SEMA_PHORE_SHIFT;
             return dma_read_subword(sema_read, offset, size);
         }
         if (base == REG_CH_DEBUG1(ch_idx)) {
