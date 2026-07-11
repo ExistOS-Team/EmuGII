@@ -1033,6 +1033,100 @@ async function testLradcIrqContract() {
   });
 }
 
+async function testLradcSchedulerContract() {
+  await withMachine(async (machine) => {
+    /* Bring LRADC out of reset and enable LRADC0/1 IRQs (status bits remain clear) */
+    await machine.writel(LRADC_BASE + 0x000, 0x00000000);
+    await machine.writel(LRADC_BASE + 0x010, 0x00030000); /* LRADC0/1 IRQ_EN */
+
+    /* Configure CH0 for accumulate mode with NUM_SAMPLES=3 and VALUE=0 */
+    await machine.writel(LRADC_BASE + 0x050, 0x23000000);
+
+    /* Schedule CH0; first accumulated sample should not raise IRQ */
+    await machine.writel(LRADC_BASE + 0x000, 0x00000001);
+    assert.equal(
+      await machine.readl(LRADC_BASE + 0x010) & 0x0001,
+      0,
+      'LRADC0 IRQ must not assert after first accumulated sample',
+    );
+    assert.equal(
+      (await machine.readl(LRADC_BASE + 0x050)) & 0x3ffff,
+      0xabc,
+      'CH0 value must be 0xabc after first accumulated sample',
+    );
+
+    /* Schedule CH0 two more times; IRQ should assert after third sample */
+    await machine.writel(LRADC_BASE + 0x000, 0x00000001);
+    await machine.writel(LRADC_BASE + 0x000, 0x00000001);
+    assert.notEqual(
+      await machine.readl(LRADC_BASE + 0x010) & 0x0001,
+      0,
+      'LRADC0 IRQ must assert after third accumulated sample',
+    );
+    assert.equal(
+      (await machine.readl(LRADC_BASE + 0x050)) & 0x3ffff,
+      0x2034,
+      'CH0 value must be 0x2034 after three accumulated samples',
+    );
+
+    /* Clear LRADC0 IRQ and reset CH0 to non-accumulate mode for delay tests */
+    await machine.writel(LRADC_BASE + 0x018, 0x00010001);
+    await machine.writel(LRADC_BASE + 0x050, 0x00000000);
+
+    /* Test delay-driven scheduling: DELAY0 triggers CH0 after 5 ticks */
+    await machine.writel(LRADC_BASE + 0x0d0, 0x01100005); /* TRIGGER_LRADCS=0x01, KICK, DELAY=5 */
+    await machine.clockStep(5 * 500_000);
+    assert.equal(
+      (await machine.readl(LRADC_BASE + 0x050)) & 0x3ffff,
+      0xabc,
+      'CH0 value must be 0xabc after DELAY0 triggers CH0',
+    );
+    assert.notEqual(
+      await machine.readl(LRADC_BASE + 0x010) & 0x0001,
+      0,
+      'LRADC0 IRQ must assert after DELAY0 triggers CH0',
+    );
+
+    /* Clear LRADC0 IRQ */
+    await machine.writel(LRADC_BASE + 0x018, 0x00010001);
+
+    /* Test delay loop: DELAY0 triggers CH0 twice with LOOP_COUNT=1 */
+    await machine.writel(LRADC_BASE + 0x0d0, 0x01100805); /* TRIGGER_LRADCS=0x01, KICK, LOOP_COUNT=1, DELAY=5 */
+    await machine.clockStep(5 * 500_000);
+    assert.equal(
+      (await machine.readl(LRADC_BASE + 0x050)) & 0x3ffff,
+      0xabc,
+      'CH0 value must be 0xabc after first DELAY0 loop iteration',
+    );
+    await machine.clockStep(5 * 500_000);
+    assert.equal(
+      (await machine.readl(LRADC_BASE + 0x050)) & 0x3ffff,
+      0xabc,
+      'CH0 value must be 0xabc after second DELAY0 loop iteration',
+    );
+    assert.notEqual(
+      await machine.readl(LRADC_BASE + 0x010) & 0x0001,
+      0,
+      'LRADC0 IRQ must assert after second DELAY0 loop iteration',
+    );
+
+    /* Test delay chaining: DELAY0 triggers DELAY1, which triggers CH1 */
+    await machine.writel(LRADC_BASE + 0x0d0, 0x01120005); /* TRIGGER_LRADCS=0x01, TRIGGER_DELAYS=0x02, KICK, DELAY=5 */
+    await machine.writel(LRADC_BASE + 0x0e0, 0x02000005); /* DELAY1 triggers CH1, DELAY=5 */
+    await machine.clockStep(10 * 500_000);
+    assert.notEqual(
+      await machine.readl(LRADC_BASE + 0x010) & 0x0002,
+      0,
+      'LRADC1 IRQ must assert after DELAY1 is triggered by DELAY0',
+    );
+    assert.equal(
+      (await machine.readl(LRADC_BASE + 0x060)) & 0x3ffff,
+      0xabc,
+      'CH1 value must be 0xabc after DELAY1 triggers CH1',
+    );
+  });
+}
+
 async function testI2cRegisterContract() {
   await withMachine(async (machine) => {
     assert.equal(
@@ -4875,6 +4969,7 @@ const tests = [
   ['PWM2 analog enable contract', testPwm2AnalogEnableContract],
   ['LRADC register contract', testLradcRegisterContract],
   ['LRADC IRQ contract', testLradcIrqContract],
+  ['LRADC scheduler contract', testLradcSchedulerContract],
   ['I2C register contract', testI2cRegisterContract],
   ['I2C DMA IRQ ownership contract', testI2cDmaIrqOwnershipContract],
   ['Application UART register contract', testAppUartRegisterContract],

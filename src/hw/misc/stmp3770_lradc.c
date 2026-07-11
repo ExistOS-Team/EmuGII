@@ -19,11 +19,17 @@
 #include "qemu/osdep.h"
 #include "hw/sysbus.h"
 #include "hw/irq.h"
+#include "qemu/timer.h"
 #include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "hw/misc/stmp3770_lradc.h"
 #include "hw/timer/stmp3770_pwm.h"
+
+typedef struct STMP3770LRADCDelayCtx {
+    STMP3770LRADCState *s;
+    int n;
+} STMP3770LRADCDelayCtx;
 
 struct STMP3770LRADCState {
     SysBusDevice parent_obj;
@@ -46,6 +52,14 @@ struct STMP3770LRADCState {
 
     /* IRQ lines: index 0 = touch, 1..8 = LRADC channels 0..7 */
     qemu_irq irq[9];
+
+    /* Scheduler/accumulate/delay state */
+    QEMUTimer *delay_timer[4];
+    STMP3770LRADCDelayCtx delay_ctx[4];
+    uint8_t delay_running[4];
+    uint8_t delay_loop_remaining[4];
+    int64_t delay_remaining_ns[4];
+    uint8_t sample_count[8];
 };
 
 #define LRADC_VERSION   0x01010000
@@ -95,6 +109,8 @@ struct STMP3770LRADCState {
 #define CTRL0_SCHEDULE_MASK 0xFF
 #define CTRL0_RW_MASK   (CTRL0_SFTRST | CTRL0_CLKGATE | (0x3FU << 16) | CTRL0_SCHEDULE_MASK)
 #define CTRL2_BL_ENABLE  (1U << 22)
+#define DELAY_KICK       (1U << 20)
+#define DELAY_TICK_NS    500000
 
 /* Channel result bits */
 #define CH_TOGGLE       (1U << 31)
@@ -156,19 +172,52 @@ static void lradc_apply_sct(uint32_t *reg, uint32_t value, int sct,
 }
 
 static void lradc_update_irq(STMP3770LRADCState *s);
+static void lradc_complete_scheduled(STMP3770LRADCState *s);
+static void lradc_start_delay(STMP3770LRADCState *s, int n, bool reload_loop);
+static void lradc_stop_delay(STMP3770LRADCState *s, int n);
+static void lradc_stop_all_delays(STMP3770LRADCState *s);
+static void lradc_resume_all_delays(STMP3770LRADCState *s);
+static void lradc_handle_clockgate(STMP3770LRADCState *s);
+static void lradc_update_delay_remaining(STMP3770LRADCState *s);
+
+static void lradc_complete_channel(STMP3770LRADCState *s, int ch)
+{
+    uint32_t num_samples = (s->channel[ch] >> CH_NUM_SAMPLES_SHIFT) &
+                           CH_NUM_SAMPLES_MASK;
+    uint32_t target = num_samples ? num_samples : 1;
+    uint32_t value = 0xABC;
+    uint32_t current_value = s->channel[ch] & CH_VALUE_MASK;
+
+    if (s->channel[ch] & CH_ACCUMULATE) {
+        current_value += value;
+        current_value &= CH_VALUE_MASK;
+        s->sample_count[ch]++;
+        if (s->sample_count[ch] >= target) {
+            s->sample_count[ch] = 0;
+            s->ctrl1 |= (1U << ch);
+        }
+    } else {
+        s->sample_count[ch] = 0;
+        current_value = value;
+        s->ctrl1 |= (1U << ch);
+    }
+
+    s->channel[ch] = (s->channel[ch] & ~CH_VALUE_MASK) | current_value;
+    s->channel[ch] ^= CH_TOGGLE;
+}
 
 static void lradc_complete_scheduled(STMP3770LRADCState *s)
 {
     int ch;
     uint32_t schedule = s->ctrl0 & CTRL0_SCHEDULE_MASK;
 
+    if (schedule == 0 || (s->ctrl0 & CTRL0_CLKGATE)) {
+        return;
+    }
+
     for (ch = 0; ch < 8; ch++) {
         if (schedule & (1U << ch)) {
-            /* Instant conversion: set TOGGLE and a plausible 12-bit value */
-            s->channel[ch] &= ~CH_VALUE_MASK;
-            s->channel[ch] |= CH_TOGGLE | 0x00000ABC;
-            /* Hardware sets the corresponding IRQ status bit */
-            s->ctrl1 |= (1U << ch);
+            lradc_complete_channel(s, ch);
         }
     }
 
@@ -199,6 +248,120 @@ static void lradc_update_irq(STMP3770LRADCState *s)
 }
 
 static void lradc_reset(DeviceState *dev);
+
+static void lradc_update_delay_remaining(STMP3770LRADCState *s)
+{
+    int n;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    for (n = 0; n < 4; n++) {
+        if (s->delay_running[n] && s->delay_timer[n]) {
+            int64_t remaining = s->delay_timer[n]->expire_time - now;
+            s->delay_remaining_ns[n] = remaining > 0 ? remaining : 0;
+        } else {
+            s->delay_remaining_ns[n] = 0;
+        }
+    }
+}
+
+static void lradc_stop_delay(STMP3770LRADCState *s, int n)
+{
+    if (s->delay_running[n]) {
+        lradc_update_delay_remaining(s);
+        timer_del(s->delay_timer[n]);
+        s->delay_running[n] = false;
+    }
+}
+
+static void lradc_stop_all_delays(STMP3770LRADCState *s)
+{
+    int n;
+
+    for (n = 0; n < 4; n++) {
+        lradc_stop_delay(s, n);
+    }
+}
+
+static void lradc_start_delay(STMP3770LRADCState *s, int n, bool reload_loop)
+{
+    uint32_t delay_ticks = s->delay[n] & 0x7FF;
+    int64_t now;
+    int64_t expire;
+
+    if (delay_ticks == 0) {
+        s->delay_running[n] = false;
+        return;
+    }
+
+    s->delay_running[n] = true;
+    if (reload_loop) {
+        s->delay_loop_remaining[n] = (s->delay[n] >> 11) & 0x1F;
+    }
+
+    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    expire = now + (int64_t)delay_ticks * DELAY_TICK_NS;
+    timer_mod(s->delay_timer[n], expire);
+}
+
+static void lradc_resume_all_delays(STMP3770LRADCState *s)
+{
+    int n;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    for (n = 0; n < 4; n++) {
+        if (s->delay_running[n]) {
+            int64_t remaining = s->delay_remaining_ns[n];
+            if (remaining <= 0) {
+                remaining = (s->delay[n] & 0x7FF) * DELAY_TICK_NS;
+                if (remaining == 0) {
+                    continue;
+                }
+            }
+            timer_mod(s->delay_timer[n], now + remaining);
+            s->delay_remaining_ns[n] = 0;
+        }
+    }
+}
+
+static void lradc_delay_expire(void *opaque)
+{
+    STMP3770LRADCDelayCtx *ctx = opaque;
+    STMP3770LRADCState *s = ctx->s;
+    int n = ctx->n;
+    uint32_t trigger_lradcs = (s->delay[n] >> 24) & 0xFF;
+    uint32_t trigger_delays = (s->delay[n] >> 16) & 0xF;
+    uint32_t self_trigger = trigger_delays & (1U << n);
+    int m;
+
+    s->delay_running[n] = false;
+
+    if (trigger_lradcs) {
+        s->ctrl0 |= trigger_lradcs & CTRL0_SCHEDULE_MASK;
+        lradc_complete_scheduled(s);
+    }
+
+    for (m = 0; m < 4; m++) {
+        if (trigger_delays & (1U << m)) {
+            lradc_start_delay(s, m, true);
+        }
+    }
+
+    if (!self_trigger) {
+        if (s->delay_loop_remaining[n] > 0) {
+            s->delay_loop_remaining[n]--;
+            lradc_start_delay(s, n, false);
+        }
+    }
+}
+
+static void lradc_handle_clockgate(STMP3770LRADCState *s)
+{
+    if (s->ctrl0 & (CTRL0_SFTRST | CTRL0_CLKGATE)) {
+        lradc_stop_all_delays(s);
+    } else {
+        lradc_resume_all_delays(s);
+    }
+}
 
 static uint64_t lradc_read(void *opaque, hwaddr offset, unsigned size)
 {
@@ -286,11 +449,10 @@ static void lradc_write(void *opaque, hwaddr offset,
         /* SFTRST resets the entire LRADC block; it also gates the clock. */
         if (s->ctrl0 & CTRL0_SFTRST) {
             lradc_reset(DEVICE(s));
-            s->ctrl0 |= CTRL0_CLKGATE;
-            s->ctrl0 &= ~CTRL0_SCHEDULE_MASK;
         }
-        /* Complete any scheduled conversions immediately */
-        if (s->ctrl0 & CTRL0_SCHEDULE_MASK) {
+        lradc_handle_clockgate(s);
+        /* Complete any scheduled conversions once the clock is running */
+        if (!(s->ctrl0 & CTRL0_CLKGATE) && (s->ctrl0 & CTRL0_SCHEDULE_MASK)) {
             lradc_complete_scheduled(s);
         }
         break;
@@ -317,20 +479,22 @@ static void lradc_write(void *opaque, hwaddr offset,
         s->channel[(base - REG_CH0) >> 4] &= CH_RW_MASK;
         break;
     case REG_DELAY0:
-        lradc_apply_sct(&s->delay[0], (uint32_t)value, sct, offset, size);
-        s->delay[0] &= DELAY_RW_MASK;
-        break;
     case REG_DELAY1:
-        lradc_apply_sct(&s->delay[1], (uint32_t)value, sct, offset, size);
-        s->delay[1] &= DELAY_RW_MASK;
-        break;
     case REG_DELAY2:
-        lradc_apply_sct(&s->delay[2], (uint32_t)value, sct, offset, size);
-        s->delay[2] &= DELAY_RW_MASK;
-        break;
     case REG_DELAY3:
-        lradc_apply_sct(&s->delay[3], (uint32_t)value, sct, offset, size);
-        s->delay[3] &= DELAY_RW_MASK;
+        {
+            int n = (base - REG_DELAY0) >> 4;
+            uint32_t old_kick = s->delay[n] & DELAY_KICK;
+
+            lradc_apply_sct(&s->delay[n], (uint32_t)value, sct, offset, size);
+            s->delay[n] &= DELAY_RW_MASK;
+
+            if (s->delay[n] & DELAY_KICK) {
+                lradc_start_delay(s, n, true);
+            } else if (old_kick) {
+                lradc_stop_delay(s, n);
+            }
+        }
         break;
     case REG_DEBUG0:
         /* Read-only */
@@ -369,6 +533,7 @@ static void lradc_reset(DeviceState *dev)
 {
     STMP3770LRADCState *s = STMP3770_LRADC(dev);
 
+    lradc_stop_all_delays(s);
     s->ctrl0 = CTRL0_SFTRST | CTRL0_CLKGATE;
     s->ctrl1 = 0;
     s->ctrl2 = 0;
@@ -381,6 +546,10 @@ static void lradc_reset(DeviceState *dev)
     /* Channel 7 is the battery monitor; default to disconnected battery (USB powered) */
     s->channel[7] = 2748;
     memset(s->delay, 0, sizeof(s->delay));
+    memset(s->delay_running, 0, sizeof(s->delay_running));
+    memset(s->delay_loop_remaining, 0, sizeof(s->delay_loop_remaining));
+    memset(s->delay_remaining_ns, 0, sizeof(s->delay_remaining_ns));
+    memset(s->sample_count, 0, sizeof(s->sample_count));
     s->debug0 = 0x43210000;
     s->debug1 = 0;
     lradc_update_irq(s);
@@ -399,6 +568,14 @@ static void lradc_realize(DeviceState *dev, Error **errp)
     for (i = 0; i < 9; i++) {
         sysbus_init_irq(sbd, &s->irq[i]);
     }
+
+    for (i = 0; i < 4; i++) {
+        s->delay_ctx[i].s = s;
+        s->delay_ctx[i].n = i;
+        s->delay_timer[i] = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                         lradc_delay_expire,
+                                         &s->delay_ctx[i]);
+    }
 }
 
 static int lradc_post_load(void *opaque, int version_id)
@@ -406,6 +583,16 @@ static int lradc_post_load(void *opaque, int version_id)
     STMP3770LRADCState *s = STMP3770_LRADC(opaque);
 
     lradc_update_pwm2_analog_enable(s);
+    lradc_resume_all_delays(s);
+    lradc_update_irq(s);
+    return 0;
+}
+
+static int lradc_pre_save(void *opaque)
+{
+    STMP3770LRADCState *s = STMP3770_LRADC(opaque);
+
+    lradc_update_delay_remaining(s);
     return 0;
 }
 
@@ -413,6 +600,7 @@ static const VMStateDescription vmstate_lradc = {
     .name = "stmp3770-lradc",
     .version_id = 1,
     .minimum_version_id = 1,
+    .pre_save = lradc_pre_save,
     .post_load = lradc_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(ctrl0, STMP3770LRADCState),
@@ -424,6 +612,10 @@ static const VMStateDescription vmstate_lradc = {
         VMSTATE_UINT32_ARRAY(channel, STMP3770LRADCState, 8),
         VMSTATE_UINT32_ARRAY(delay, STMP3770LRADCState, 4),
         VMSTATE_UINT32(debug1, STMP3770LRADCState),
+        VMSTATE_UINT8_ARRAY(delay_running, STMP3770LRADCState, 4),
+        VMSTATE_UINT8_ARRAY(delay_loop_remaining, STMP3770LRADCState, 4),
+        VMSTATE_INT64_ARRAY(delay_remaining_ns, STMP3770LRADCState, 4),
+        VMSTATE_UINT8_ARRAY(sample_count, STMP3770LRADCState, 8),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -442,6 +634,10 @@ static void lradc_init(Object *obj)
     memset(s->channel, 0, sizeof(s->channel));
     s->channel[7] = 2748;
     memset(s->delay, 0, sizeof(s->delay));
+    memset(s->delay_running, 0, sizeof(s->delay_running));
+    memset(s->delay_loop_remaining, 0, sizeof(s->delay_loop_remaining));
+    memset(s->delay_remaining_ns, 0, sizeof(s->delay_remaining_ns));
+    memset(s->sample_count, 0, sizeof(s->sample_count));
     s->debug0 = 0x43210000;
     s->debug1 = 0;
 }
