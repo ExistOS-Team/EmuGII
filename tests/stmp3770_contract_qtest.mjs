@@ -3691,6 +3691,61 @@ async function testEcc8AhbBusErrorContract() {
   });
 }
 
+async function testEcc8DebugTriggerContract() {
+  await withMachine(async (machine) => {
+    const runBit = 1 << 29;
+    const commandRead = 1 << 24;
+    const wordLength8Bit = 1 << 23;
+    const addressData = 0 << 17;
+    const enableEcc = 1 << 12;
+    const payload = SRAM_BASE + 0x18000;
+    const auxiliary = SRAM_BASE + 0x20000;
+
+    /* Release BCH and GPMI from reset/clock gate. */
+    await machine.writel(BCH_BASE + 0x008, 0xe0000000);
+    await machine.writel(GPMI_BASE + 0x000, 0);
+
+    /* Enable debug trigger interrupts and configure a normal ECC read. */
+    const debugEnable = (1 << 10) | (1 << 9); /* DEBUG_STALL_IRQ_EN + DEBUG_WRITE_IRQ_EN */
+    await machine.writel(BCH_BASE + 0x000, debugEnable);
+    await machine.writel(GPMI_BASE + 0x040, payload);
+    await machine.writel(GPMI_BASE + 0x050, auxiliary);
+    await machine.writel(GPMI_BASE + 0x020, enableEcc | 0x10f);
+
+    const readCtrl0 = runBit | commandRead | wordLength8Bit | addressData | 1;
+    await machine.writel(GPMI_BASE + 0x000, readCtrl0);
+
+    assert.notEqual(
+      (await machine.readl(BCH_BASE + 0x000)) & (1 << 1),
+      0,
+      'ECC8 must set DEBUG_WRITE_IRQ when DEBUG_WRITE_IRQ_EN is set for each transfer',
+    );
+    assert.notEqual(
+      (await machine.readl(BCH_BASE + 0x000)) & (1 << 2),
+      0,
+      'ECC8 must set DEBUG_STALL_IRQ when DEBUG_STALL_IRQ_EN is set per block',
+    );
+    assert.notEqual(
+      (await machine.readl(ICOLL_BASE + 0x040)) & (1 << 21),
+      0,
+      'ECC8 debug trigger must assert the ECC8 ICOLL source (raw bit 21)',
+    );
+
+    /* Clear debug trigger status; enable bits remain and IRQ should de-assert. */
+    await machine.writel(BCH_BASE + 0x008, (1 << 2) | (1 << 1));
+    assert.equal(
+      (await machine.readl(BCH_BASE + 0x000)) & ((1 << 2) | (1 << 1)),
+      0,
+      'ECC8 DEBUG_STALL_IRQ and DEBUG_WRITE_IRQ must clear with CTRL_CLR',
+    );
+    assert.equal(
+      (await machine.readl(ICOLL_BASE + 0x040)) & (1 << 21),
+      0,
+      'ECC8 debug trigger IRQ must de-assert after status is cleared',
+    );
+  });
+}
+
 async function testGpmiDataFifoContract() {
   await withMachine(async (machine) => {
     await machine.writel(GPMI_BASE + 0x000, 0);
@@ -6467,6 +6522,7 @@ const tests = [
   ['ECC8 completion result contract', testEcc8CompletionResultContract],
   ['ECC8 register contract', testEcc8RegisterContract],
   ['ECC8 AHB bus error contract', testEcc8AhbBusErrorContract],
+  ['ECC8 debug trigger contract', testEcc8DebugTriggerContract],
   ['GPMI DATA FIFO contract', testGpmiDataFifoContract],
   ['GPMI RUN WORD_LENGTH XFER_COUNT contract', testGpmiRunWordLengthXferCountContract],
   ['APBH DMA 64 KiB and AHB error contract', testApbhDma64KAndAhbErrorContract],

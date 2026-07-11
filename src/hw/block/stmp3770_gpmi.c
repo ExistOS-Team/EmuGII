@@ -494,6 +494,12 @@ static void gpmi_bch_complete_read(STMP3770GPMIState *s)
                 MEMTX_OK) {
                 bus_error = true;
             }
+            if (bch->ctrl & BCH_CTRL_DEBUG_WRITE_IRQ_EN) {
+                bch->ctrl |= BCH_CTRL_DEBUG_WRITE_IRQ;
+            }
+            if (bch->ctrl & BCH_CTRL_DEBUG_STALL_IRQ_EN) {
+                bch->ctrl |= BCH_CTRL_DEBUG_STALL_IRQ;
+            }
         }
     }
     if ((buffer_mask & (1U << 8)) && s->auxiliary) {
@@ -508,6 +514,9 @@ static void gpmi_bch_complete_read(STMP3770GPMIState *s)
                                 aux_meta, sizeof(aux_meta)) != MEMTX_OK) {
             bus_error = true;
         }
+        if (bch->ctrl & BCH_CTRL_DEBUG_WRITE_IRQ_EN) {
+            bch->ctrl |= BCH_CTRL_DEBUG_WRITE_IRQ;
+        }
 
         /* Status byte at offset 16: 0x00 means no error. */
         {
@@ -517,6 +526,9 @@ static void gpmi_bch_complete_read(STMP3770GPMIState *s)
                                     &status, 1) != MEMTX_OK) {
                 bus_error = true;
             }
+        }
+        if (bch->ctrl & BCH_CTRL_DEBUG_WRITE_IRQ_EN) {
+            bch->ctrl |= BCH_CTRL_DEBUG_WRITE_IRQ;
         }
     }
 
