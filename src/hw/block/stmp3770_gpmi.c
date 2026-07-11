@@ -1168,6 +1168,10 @@ static void gpmi_execute_command(STMP3770GPMIState *s)
         s->ctrl0 &= ~GPMI_CTRL0_RUN;
     }
     gpmi_update_busy(s);
+
+    if (mode != GPMI_COMMAND_MODE_WAIT_FOR_READY) {
+        s->debug ^= 1U << (GPMI_DEBUG_CMD_END_SHIFT + channel);
+    }
 }
 
 static uint64_t gpmi_read(void *opaque, hwaddr offset, unsigned size)

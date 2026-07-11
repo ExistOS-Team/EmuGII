@@ -3745,6 +3745,7 @@ async function testGpmiRunWordLengthXferCountContract() {
     const addressData = 0 << 17;
     const addressCLE = 1 << 17;
     const addressIncrement = 1 << 16;
+    const cmdEnd0 = 1 << 12;
 
     /* Release GPMI from reset and turn on its clock. */
     await machine.writel(CLKCTRL_BASE + 0x080, 0x00000001);
@@ -3799,7 +3800,14 @@ async function testGpmiRunWordLengthXferCountContract() {
     await machine.writew(GPMI_BASE + 0x0a0, 0x7856);
     await machine.writew(GPMI_BASE + 0x0a0, 0xbc9a);
     const writeCtrl0 = runBit | commandWrite | addressData | 3;
+    const debugBeforeWrite = await machine.readl(GPMI_BASE + 0x0c0);
     await machine.writel(GPMI_BASE + 0x000, writeCtrl0);
+    const debugAfterWrite = await machine.readl(GPMI_BASE + 0x0c0);
+    assert.notEqual(
+      (debugAfterWrite ^ debugBeforeWrite) & cmdEnd0,
+      0,
+      'GPMI PIO WRITE must toggle CMD_END0',
+    );
     assert.equal(
       (await machine.readl(GPMI_BASE + 0x0b0)) & 0x30,
       0x20,
@@ -3814,11 +3822,25 @@ async function testGpmiRunWordLengthXferCountContract() {
     /* Send READ ID command (0x90 0x00) using 16-bit XFER_COUNT=1 (one halfword). */
     await machine.writew(GPMI_BASE + 0x0a0, 0x0090);
     const readIdCtrl0 = runBit | commandWrite | addressCLE | addressIncrement | 1;
+    const debugBeforeReadId = await machine.readl(GPMI_BASE + 0x0c0);
     await machine.writel(GPMI_BASE + 0x000, readIdCtrl0);
+    const debugAfterReadId = await machine.readl(GPMI_BASE + 0x0c0);
+    assert.notEqual(
+      (debugAfterReadId ^ debugBeforeReadId) & cmdEnd0,
+      0,
+      'GPMI PIO WRITE CLE must toggle CMD_END0',
+    );
 
     /* 16-bit READ XFER_COUNT=2 must return 4 bytes (2 halfwords). */
     const read16Ctrl0 = runBit | commandRead | addressData | 2;
+    const debugBeforeRead16 = await machine.readl(GPMI_BASE + 0x0c0);
     await machine.writel(GPMI_BASE + 0x000, read16Ctrl0);
+    const debugAfterRead16 = await machine.readl(GPMI_BASE + 0x0c0);
+    assert.notEqual(
+      (debugAfterRead16 ^ debugBeforeRead16) & cmdEnd0,
+      0,
+      'GPMI PIO READ must toggle CMD_END0',
+    );
     const half0 = await machine.readw(GPMI_BASE + 0x0a0);
     const half1 = await machine.readw(GPMI_BASE + 0x0a0);
     assert.equal(
@@ -3829,7 +3851,14 @@ async function testGpmiRunWordLengthXferCountContract() {
 
     /* 8-bit READ XFER_COUNT=4 must return the same 4 bytes. */
     const read8Ctrl0 = runBit | wordLengthBit | commandRead | addressData | 4;
+    const debugBeforeRead8 = await machine.readl(GPMI_BASE + 0x0c0);
     await machine.writel(GPMI_BASE + 0x000, read8Ctrl0);
+    const debugAfterRead8 = await machine.readl(GPMI_BASE + 0x0c0);
+    assert.notEqual(
+      (debugAfterRead8 ^ debugBeforeRead8) & cmdEnd0,
+      0,
+      'GPMI PIO READ must toggle CMD_END0',
+    );
     const word = await machine.readl(GPMI_BASE + 0x0a0);
     assert.equal(
       (await machine.readl(GPMI_BASE + 0x0b0)) & 0x30,
