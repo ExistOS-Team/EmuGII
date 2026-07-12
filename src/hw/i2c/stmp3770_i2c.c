@@ -168,6 +168,7 @@ static void stmp3770_i2c_write(void *opaque, hwaddr offset,
             /* Stub: complete the transfer immediately */
             s->ctrl0 &= ~I2C_CTRL0_RUN;
             s->ctrl1 |= I2C_CTRL1_DATA_ENGINE_CMPLT_IRQ;
+            stmp3770_i2c_update_irq(s);
         }
         break;
     case I2C_TIMING0:

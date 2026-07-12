@@ -1664,6 +1664,36 @@ async function testI2cRegisterContract() {
   });
 }
 
+async function testI2cDataEngineCompleteIrqContract() {
+  await withMachine(async (machine) => {
+    const ctrl1Set = I2C_BASE + 0x044;
+    const ctrl0Clr = I2C_BASE + 0x008;
+    const ctrl0Set = I2C_BASE + 0x004;
+
+    await machine.writel(ctrl0Clr, 0xc0000000);
+    await machine.writel(ctrl1Set, 0x00004000);
+    await machine.writel(ctrl0Set, 0x20000000);
+
+    const stat = await machine.readl(I2C_BASE + 0x050);
+    assert.notEqual(
+      stat & (1 << 6),
+      0,
+      'I2C DATA_ENGINE_CMPLT_IRQ must be summarized in STAT after RUN completes',
+    );
+    assert.equal(
+      await machine.readl(I2C_BASE + 0x000) & (1 << 29),
+      0,
+      'I2C RUN must self-clear on completion',
+    );
+    const raw0 = await machine.readl(ICOLL_BASE + 0x040);
+    assert.notEqual(
+      raw0 & (1 << 27),
+      0,
+      'I2C DATA_ENGINE_CMPLT_IRQ must assert ICOLL source 27 when enabled',
+    );
+  });
+}
+
 async function testI2cDmaIrqOwnershipContract() {
   await withMachine(async (machine) => {
     const descriptor = 0x00000400;
@@ -6525,6 +6555,7 @@ const tests = [
   ['LRADC CTRL3 power and discard contract', testLradcCtrl3PowerAndDiscardContract],
   ['LRADC STATUS and CTRL3 clock contract', testLradcStatusAndCtrl3ClockContract],
   ['I2C register contract', testI2cRegisterContract],
+  ['I2C data engine complete IRQ contract', testI2cDataEngineCompleteIrqContract],
   ['I2C DMA IRQ ownership contract', testI2cDmaIrqOwnershipContract],
   ['Application UART register contract', testAppUartRegisterContract],
   ['Debug UART register contract', testDebugUartRegisterContract],
