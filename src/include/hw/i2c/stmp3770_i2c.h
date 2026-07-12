@@ -67,6 +67,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(STMP3770I2CState, STMP3770_I2C)
 /* VERSION value */
 #define I2C_VERSION_VALUE 0x01010000
 
+#define I2C_FIFO_DEPTH 8
+
+struct STMP3770DMAState;
+
 struct STMP3770I2CState {
     SysBusDevice parent_obj;
 
@@ -81,6 +85,21 @@ struct STMP3770I2CState {
     uint32_t data;
     uint32_t debug0;
     uint32_t debug1;
+
+    uint8_t fifo[I2C_FIFO_DEPTH];
+    unsigned int fifo_count;
+    unsigned int fifo_rptr;
+    unsigned int fifo_wptr;
+
+    uint32_t xfer_count;
+    bool data_engine_busy;
+    bool dma_wait4endcmd;
+
+    struct STMP3770DMAState *dma;
+    int dma_channel;
 };
+
+void stmp3770_i2c_set_dma(STMP3770I2CState *s, struct STMP3770DMAState *dma,
+                          int channel);
 
 #endif /* STMP3770_I2C_H */

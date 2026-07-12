@@ -1672,7 +1672,7 @@ async function testI2cDataEngineCompleteIrqContract() {
 
     await machine.writel(ctrl0Clr, 0xc0000000);
     await machine.writel(ctrl1Set, 0x00004000);
-    await machine.writel(ctrl0Set, 0x20000000);
+    await machine.writel(ctrl0Set, 0x20000001);
 
     const stat = await machine.readl(I2C_BASE + 0x050);
     assert.notEqual(
@@ -1719,6 +1719,83 @@ async function testI2cDmaIrqOwnershipContract() {
       (await machine.readl(ICOLL_BASE + 0x040)) & (1 << 26),
       0,
       'I2C device status writes must not clear the APBX-owned I2C DMA source',
+    );
+  });
+}
+
+async function testI2cDmaFifoContract() {
+  await withMachine(async (machine) => {
+    const descriptor = 0x00000500;
+    const buffer = 0x00001000;
+    const channel3Nxtcmdar = APBX_BASE + 0x1a0;
+    const channel3Sema = APBX_BASE + 0x1d0;
+
+    const cmd =
+      (6 << 16) | /* XFER_COUNT */
+      (1 << 12) | /* CMDWORDS */
+      (1 << 7) |  /* WAIT4ENDCMD */
+      (1 << 6) |  /* SEMAPHORE */
+      (1 << 3) |  /* IRQONCMPLT */
+      2;          /* DMA_READ */
+
+    const pio =
+      (1 << 29) | /* RUN */
+      (1 << 20) | /* POST_SEND_STOP */
+      (1 << 19) | /* PRE_SEND_START */
+      (1 << 17) | /* MASTER_MODE */
+      (1 << 16) | /* DIRECTION: TRANSMIT */
+      6;          /* XFER_COUNT */
+
+    await machine.writel(APBX_BASE + 0x008, 0xc0000000);
+    await machine.writel(APBX_BASE + 0x014, 1 << 11);
+    await machine.writel(I2C_BASE + 0x044, 0x00004000);
+
+    await machine.writel(buffer + 0x00, 0x03020156);
+    await machine.writel(buffer + 0x04, 0x00000504);
+
+    await machine.writel(descriptor + 0x00, 0);
+    await machine.writel(descriptor + 0x04, cmd);
+    await machine.writel(descriptor + 0x08, buffer);
+    await machine.writel(descriptor + 0x0c, pio);
+
+    await machine.writel(channel3Nxtcmdar, descriptor);
+    await machine.writel(channel3Sema, 1);
+
+    assert.equal(
+      await machine.readl(channel3Sema),
+      0,
+      'APBX I2C channel semaphore must be decremented on completion',
+    );
+    assert.equal(
+      (await machine.readl(APBX_BASE + 0x010)) & (1 << 3),
+      1 << 3,
+      'APBX channel 3 CMDCMPLT status must be set',
+    );
+    assert.notEqual(
+      (await machine.readl(ICOLL_BASE + 0x040)) & (1 << 26),
+      0,
+      'APBX I2C DMA completion must assert ICOLL source 26',
+    );
+
+    assert.equal(
+      await machine.readl(I2C_BASE + 0x000) & (1 << 29),
+      0,
+      'I2C RUN must be cleared after the DMA transfer completes',
+    );
+    assert.equal(
+      (await machine.readl(I2C_BASE + 0x040)) & (1 << 6),
+      1 << 6,
+      'I2C DATA_ENGINE_CMPLT_IRQ must be set',
+    );
+    assert.notEqual(
+      (await machine.readl(ICOLL_BASE + 0x040)) & (1 << 27),
+      0,
+      'I2C DATA_ENGINE_CMPLT_IRQ must assert ICOLL source 27',
+    );
+    assert.equal(
+      await machine.readl(I2C_BASE + 0x050) & (1 << 6),
+      1 << 6,
+      'I2C STAT must summarize the DATA_ENGINE_CMPLT_IRQ',
     );
   });
 }
@@ -6557,6 +6634,7 @@ const tests = [
   ['I2C register contract', testI2cRegisterContract],
   ['I2C data engine complete IRQ contract', testI2cDataEngineCompleteIrqContract],
   ['I2C DMA IRQ ownership contract', testI2cDmaIrqOwnershipContract],
+  ['I2C DMA FIFO data contract', testI2cDmaFifoContract],
   ['Application UART register contract', testAppUartRegisterContract],
   ['Debug UART register contract', testDebugUartRegisterContract],
   ['LCDIF CTRL1 interrupt layout', testLcdifCtrl1Layout],

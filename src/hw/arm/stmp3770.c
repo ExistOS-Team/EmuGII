@@ -522,6 +522,8 @@ static void stmp3770_realize(DeviceState *dev, Error **errp)
     sysbus_connect_irq(SYS_BUS_DEVICE(s->i2c), 0,
                        qdev_get_gpio_in(DEVICE(s->icoll), STMP3770_IRQ_I2C_ERROR));
 
+    stmp3770_i2c_set_dma(s->i2c, s->apbx_dma, 3);
+
     /* Realize LCDIF */
     if (!sysbus_realize(SYS_BUS_DEVICE(s->lcdif), errp)) {
         return;
