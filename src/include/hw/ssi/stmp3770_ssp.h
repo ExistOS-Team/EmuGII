@@ -58,11 +58,18 @@ OBJECT_DECLARE_SIMPLE_TYPE(STMP3770SSPState, STMP3770_SSP)
 #define SSP_STATUS_FIFO_OVRFLW   (1U << 9)
 #define SSP_STATUS_FIFO_EMPTY    (1U << 5)
 #define SSP_STATUS_FIFO_UNDRFLW  (1U << 4)
+#define SSP_STATUS_CEATA_CCS_ERR (1U << 10)
 #define SSP_STATUS_RECV_TIMEOUT_STAT (1U << 11)
-#define SSP_STATUS_DMASENSE      (1U << 21)
-#define SSP_STATUS_DMATERM       (1U << 20)
-#define SSP_STATUS_DMAREQ        (1U << 19)
+#define SSP_STATUS_TIMEOUT       (1U << 12)
+#define SSP_STATUS_DATA_CRC_ERR  (1U << 13)
+#define SSP_STATUS_RESP_TIMEOUT  (1U << 14)
+#define SSP_STATUS_RESP_ERR      (1U << 15)
+#define SSP_STATUS_RESP_CRC_ERR  (1U << 16)
+#define SSP_STATUS_SDIO_IRQ      (1U << 17)
 #define SSP_STATUS_DMAEND        (1U << 18)
+#define SSP_STATUS_DMAREQ        (1U << 19)
+#define SSP_STATUS_DMATERM       (1U << 20)
+#define SSP_STATUS_DMASENSE      (1U << 21)
 #define SSP_STATUS_CMD_BUSY      (1U << 3)
 #define SSP_STATUS_DATA_BUSY     (1U << 2)
 #define SSP_STATUS_BUSY          (1U << 0)
@@ -79,6 +86,18 @@ OBJECT_DECLARE_SIMPLE_TYPE(STMP3770SSPState, STMP3770_SSP)
 #define SSP_CTRL1_FIFO_OVERRUN_IRQ  (1U << 15)
 #define SSP_CTRL1_FIFO_OVERRUN_EN   (1U << 14)
 #define SSP_CTRL1_DMA_ENABLE        (1U << 13)
+#define SSP_CTRL1_DATA_CRC_IRQ      (1U << 23)
+#define SSP_CTRL1_DATA_CRC_EN       (1U << 22)
+#define SSP_CTRL1_RESP_TIMEOUT_IRQ  (1U << 27)
+#define SSP_CTRL1_RESP_TIMEOUT_EN   (1U << 26)
+#define SSP_CTRL1_RESP_ERR_IRQ      (1U << 29)
+#define SSP_CTRL1_RESP_ERR_EN       (1U << 28)
+#define SSP_CTRL1_SDIO_IRQ          (1U << 31)
+#define SSP_CTRL1_SDIO_EN           (1U << 30)
+#define SSP_CTRL1_DATA_TIMEOUT_IRQ  (1U << 25)
+#define SSP_CTRL1_DATA_TIMEOUT_EN   (1U << 24)
+#define SSP_CTRL1_CEATA_CCS_ERR_IRQ (1U << 19)
+#define SSP_CTRL1_CEATA_CCS_ERR_EN  (1U << 18)
 #define SSP_CTRL1_WORD_LENGTH_MASK  (0xFU << 4)
 #define SSP_CTRL1_SSP_MODE_MASK     0x0000000FU
 #define SSP_CTRL1_RESET_VALUE (SSP_CTRL1_FIFO_UNDERRUN_IRQ | (8U << 4))
@@ -112,6 +131,8 @@ struct STMP3770SSPState {
     uint32_t hclk_hz;
     uint8_t fifo_count;
     QEMUTimer *recv_timeout_timer;
+    QEMUTimer *resp_timeout_timer;
+    QEMUTimer *data_timeout_timer;
 };
 
 void stmp3770_ssp_set_dma(STMP3770SSPState *s, STMP3770DMAState *dma,

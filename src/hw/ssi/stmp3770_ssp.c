@@ -85,6 +85,10 @@ static void stmp3770_ssp_update_irq(STMP3770SSPState *s)
                  (pending & s->ctrl1 & SSP_CTRL1_ERROR_IRQ_ENABLE_MASK) != 0);
 }
 
+static void stmp3770_ssp_update_debug(STMP3770SSPState *s);
+static void stmp3770_ssp_update_dma_status(STMP3770SSPState *s);
+static void stmp3770_ssp_update_status(STMP3770SSPState *s, uint32_t old_ctrl1);
+
 static unsigned int stmp3770_ssp_bytes_per_word(STMP3770SSPState *s)
 {
     unsigned int word_length = (s->ctrl1 >> 4) & 0xFU;
@@ -126,6 +130,102 @@ static void stmp3770_ssp_recv_timeout_expired(void *opaque)
     s->status |= SSP_STATUS_RECV_TIMEOUT_STAT;
     s->ctrl1 |= SSP_CTRL1_RECV_TIMEOUT_IRQ;
     stmp3770_ssp_update_irq(s);
+}
+
+/* Response timeout: 64 SCK cycles for SD/MMC/CE-ATA, 16 for Memory Stick */
+#define SSP_RESP_TIMEOUT_CYCLES_SD 64
+#define SSP_RESP_TIMEOUT_CYCLES_MS 16
+
+/* Data timeout uses HW_SSP_TIMING.TIMEOUT * 4096 SCK cycles */
+#define SSP_DATA_TIMEOUT_MULTIPLIER 4096
+
+static void stmp3770_ssp_cancel_resp_timeout(STMP3770SSPState *s)
+{
+    timer_del(s->resp_timeout_timer);
+}
+
+static void stmp3770_ssp_cancel_data_timeout(STMP3770SSPState *s)
+{
+    timer_del(s->data_timeout_timer);
+}
+
+static void stmp3770_ssp_start_resp_timeout(STMP3770SSPState *s)
+{
+    unsigned int ssp_mode = s->ctrl1 & SSP_CTRL1_SSP_MODE_MASK;
+    bool is_ms = (ssp_mode == 0x4U);
+    bool is_sd_mmc = (ssp_mode == 0x3U || ssp_mode == 0x7U);
+    uint64_t cycles;
+    uint64_t ns;
+
+    if (s->sspclk_rate == 0 || !(s->ctrl0 & SSP_CTRL0_RUN) ||
+        !(s->ctrl0 & SSP_CTRL0_GET_RESP) || (!is_sd_mmc && !is_ms) ||
+        (s->status & SSP_STATUS_RESP_TIMEOUT)) {
+        return;
+    }
+
+    cycles = is_ms ? SSP_RESP_TIMEOUT_CYCLES_MS :
+                     SSP_RESP_TIMEOUT_CYCLES_SD;
+    ns = (cycles * NANOSECONDS_PER_SECOND + s->sspclk_rate - 1) /
+         s->sspclk_rate;
+
+    timer_mod(s->resp_timeout_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + ns);
+}
+
+static void stmp3770_ssp_start_data_timeout(STMP3770SSPState *s)
+{
+    unsigned int ssp_mode = s->ctrl1 & SSP_CTRL1_SSP_MODE_MASK;
+    bool is_ms = (ssp_mode == 0x4U);
+    bool is_sd_mmc = (ssp_mode == 0x3U || ssp_mode == 0x7U);
+    uint32_t timeout_count = (s->timing & SSP_TIMING_TIMEOUT_MASK) >> 16;
+    uint64_t cycles;
+    uint64_t ns;
+
+    if (s->sspclk_rate == 0 || timeout_count == 0 ||
+        !(s->ctrl0 & SSP_CTRL0_RUN) || (!is_sd_mmc && !is_ms) ||
+        (s->status & SSP_STATUS_TIMEOUT)) {
+        return;
+    }
+
+    if (is_sd_mmc && !(s->ctrl0 & SSP_CTRL0_DATA_XFER)) {
+        return;
+    }
+
+    cycles = (uint64_t)timeout_count * SSP_DATA_TIMEOUT_MULTIPLIER;
+    ns = (cycles * NANOSECONDS_PER_SECOND + s->sspclk_rate - 1) /
+         s->sspclk_rate;
+
+    timer_mod(s->data_timeout_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + ns);
+}
+
+static void stmp3770_ssp_resp_timeout_expired(void *opaque)
+{
+    STMP3770SSPState *s = STMP3770_SSP(opaque);
+
+    if (!(s->ctrl0 & SSP_CTRL0_RUN) || (s->status & SSP_STATUS_RESP_TIMEOUT)) {
+        return;
+    }
+
+    s->status |= SSP_STATUS_RESP_TIMEOUT;
+    s->ctrl1 |= SSP_CTRL1_RESP_TIMEOUT_IRQ;
+    stmp3770_ssp_cancel_data_timeout(s);
+    stmp3770_ssp_update_irq(s);
+}
+
+static void stmp3770_ssp_data_timeout_expired(void *opaque)
+{
+    STMP3770SSPState *s = STMP3770_SSP(opaque);
+
+    if (!(s->ctrl0 & SSP_CTRL0_RUN) || (s->status & SSP_STATUS_TIMEOUT)) {
+        return;
+    }
+
+    s->status |= SSP_STATUS_TIMEOUT;
+    s->ctrl1 |= SSP_CTRL1_DATA_TIMEOUT_IRQ;
+    stmp3770_ssp_cancel_resp_timeout(s);
+    stmp3770_ssp_update_irq(s);
+    stmp3770_ssp_update_dma_status(s);
 }
 
 /* DEBUG/DMA state machine values */
@@ -205,6 +305,8 @@ static void stmp3770_ssp_update_dma_status(STMP3770SSPState *s)
     uint32_t dma_bits = 0;
     bool run = s->ctrl0 & SSP_CTRL0_RUN;
     bool dma_enable = s->ctrl1 & SSP_CTRL1_DMA_ENABLE;
+    uint32_t dma_err = SSP_STATUS_TIMEOUT | SSP_STATUS_DATA_CRC_ERR |
+                       SSP_STATUS_CEATA_CCS_ERR;
 
     if (dma_enable) {
         if (run) {
@@ -212,11 +314,43 @@ static void stmp3770_ssp_update_dma_status(STMP3770SSPState *s)
         } else {
             dma_bits |= (SSP_STATUS_DMAEND | SSP_STATUS_DMATERM);
         }
+        if (s->status & dma_err) {
+            dma_bits |= SSP_STATUS_DMASENSE;
+        }
     }
 
     s->status &= ~(SSP_STATUS_DMASENSE | SSP_STATUS_DMATERM |
                    SSP_STATUS_DMAREQ | SSP_STATUS_DMAEND);
     s->status |= dma_bits;
+}
+
+static void stmp3770_ssp_update_status(STMP3770SSPState *s,
+                                        uint32_t old_ctrl1)
+{
+    uint32_t new_ctrl1 = s->ctrl1;
+    uint32_t changed_to_1 = ~old_ctrl1 & new_ctrl1;
+
+    if (new_ctrl1 & SSP_CTRL1_SDIO_IRQ) {
+        s->status |= SSP_STATUS_SDIO_IRQ;
+    } else {
+        s->status &= ~SSP_STATUS_SDIO_IRQ;
+    }
+
+    if (changed_to_1 & SSP_CTRL1_DATA_TIMEOUT_IRQ) {
+        s->status |= SSP_STATUS_TIMEOUT;
+    }
+    if (changed_to_1 & SSP_CTRL1_RESP_TIMEOUT_IRQ) {
+        s->status |= SSP_STATUS_RESP_TIMEOUT;
+    }
+    if (changed_to_1 & SSP_CTRL1_DATA_CRC_IRQ) {
+        s->status |= SSP_STATUS_DATA_CRC_ERR;
+    }
+    if (changed_to_1 & SSP_CTRL1_RESP_ERR_IRQ) {
+        s->status |= (SSP_STATUS_RESP_ERR | SSP_STATUS_RESP_CRC_ERR);
+    }
+    if (changed_to_1 & SSP_CTRL1_CEATA_CCS_ERR_IRQ) {
+        s->status |= SSP_STATUS_CEATA_CCS_ERR;
+    }
 }
 
 static void stmp3770_ssp_fifo_set_empty(STMP3770SSPState *s)
@@ -255,8 +389,11 @@ static void stmp3770_ssp_complete_data_word(STMP3770SSPState *s)
         s->ctrl0 &= ~SSP_CTRL0_RUN;
         s->status &= ~(SSP_STATUS_BUSY | SSP_STATUS_CMD_BUSY |
                        SSP_STATUS_DATA_BUSY);
+        stmp3770_ssp_cancel_resp_timeout(s);
+        stmp3770_ssp_cancel_data_timeout(s);
     }
 
+    stmp3770_ssp_update_status(s, s->ctrl1);
     stmp3770_ssp_update_debug(s);
     stmp3770_ssp_update_dma_status(s);
 }
@@ -285,10 +422,11 @@ static void stmp3770_ssp_reset(DeviceState *dev)
     s->sdresp[3] = 0;
     s->status = SSP_STATUS_RESET_VALUE;
     s->debug = 0;
-    s->sspclk_rate = 0;
     s->fifo_count = 0;
 
     stmp3770_ssp_cancel_recv_timeout(s);
+    stmp3770_ssp_cancel_resp_timeout(s);
+    stmp3770_ssp_cancel_data_timeout(s);
     stmp3770_ssp_update_debug(s);
     stmp3770_ssp_update_dma_status(s);
     stmp3770_ssp_update_irq(s);
@@ -387,6 +525,7 @@ static void stmp3770_ssp_write(void *opaque, hwaddr offset,
     case SSP_CTRL0:
     {
         uint32_t old_ctrl0 = s->ctrl0;
+        uint32_t old_ctrl1 = s->ctrl1;
 
         stmp3770_ssp_apply_sct(&s->ctrl0, (uint32_t)value, sct);
         if (s->ctrl0 & SSP_CTRL0_SFTRST) {
@@ -406,15 +545,22 @@ static void stmp3770_ssp_write(void *opaque, hwaddr offset,
                 } else {
                     s->status |= SSP_STATUS_FIFO_EMPTY;
                 }
+                stmp3770_ssp_cancel_resp_timeout(s);
+                stmp3770_ssp_cancel_data_timeout(s);
                 stmp3770_ssp_start_recv_timeout(s);
+                stmp3770_ssp_start_resp_timeout(s);
+                stmp3770_ssp_start_data_timeout(s);
             }
         } else if ((old_ctrl0 & SSP_CTRL0_RUN) &&
                    !(s->ctrl0 & SSP_CTRL0_RUN)) {
             s->status &= ~(SSP_STATUS_BUSY | SSP_STATUS_CMD_BUSY |
                            SSP_STATUS_DATA_BUSY);
             stmp3770_ssp_cancel_recv_timeout(s);
+            stmp3770_ssp_cancel_resp_timeout(s);
+            stmp3770_ssp_cancel_data_timeout(s);
         }
 
+        stmp3770_ssp_update_status(s, old_ctrl1);
         stmp3770_ssp_update_debug(s);
         stmp3770_ssp_update_dma_status(s);
         break;
@@ -427,6 +573,7 @@ static void stmp3770_ssp_write(void *opaque, hwaddr offset,
         if (s->ctrl0 & SSP_CTRL0_RUN) {
             s->ctrl1 = (s->ctrl1 & ~0xFFU) | (old_ctrl1 & 0xFFU);
         }
+        stmp3770_ssp_update_status(s, old_ctrl1);
         stmp3770_ssp_update_irq(s);
         stmp3770_ssp_update_debug(s);
         stmp3770_ssp_update_dma_status(s);
@@ -491,6 +638,10 @@ static void stmp3770_ssp_init(Object *obj)
     s->hclk_hz = 0;
     s->recv_timeout_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                          stmp3770_ssp_recv_timeout_expired, s);
+    s->resp_timeout_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                         stmp3770_ssp_resp_timeout_expired, s);
+    s->data_timeout_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                         stmp3770_ssp_data_timeout_expired, s);
 
     memory_region_init_io(&s->iomem, obj, &stmp3770_ssp_ops, s,
                           TYPE_STMP3770_SSP, 0x2000);
@@ -504,6 +655,8 @@ static void stmp3770_ssp_finalize(Object *obj)
     STMP3770SSPState *s = STMP3770_SSP(obj);
 
     timer_free(s->recv_timeout_timer);
+    timer_free(s->resp_timeout_timer);
+    timer_free(s->data_timeout_timer);
 }
 
 static int stmp3770_ssp_post_load(void *opaque, int version_id)
@@ -517,6 +670,9 @@ static int stmp3770_ssp_post_load(void *opaque, int version_id)
         s->fifo_count = (s->status & SSP_STATUS_FIFO_FULL) ? 1 : 0;
     }
     stmp3770_ssp_start_recv_timeout(s);
+    stmp3770_ssp_start_resp_timeout(s);
+    stmp3770_ssp_start_data_timeout(s);
+    stmp3770_ssp_update_status(s, s->ctrl1);
     stmp3770_ssp_update_debug(s);
     stmp3770_ssp_update_dma_status(s);
     stmp3770_ssp_update_irq(s);
@@ -526,7 +682,7 @@ static int stmp3770_ssp_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_stmp3770_ssp = {
     .name = "stmp3770-ssp",
-    .version_id = 5,
+    .version_id = 6,
     .minimum_version_id = 1,
     .post_load = stmp3770_ssp_post_load,
     .fields = (const VMStateField[]) {
@@ -546,6 +702,8 @@ static const VMStateDescription vmstate_stmp3770_ssp = {
         VMSTATE_UINT8_V(fifo_count, STMP3770SSPState, 4),
         VMSTATE_UINT32_V(hclk_hz, STMP3770SSPState, 5),
         VMSTATE_TIMER_PTR(recv_timeout_timer, STMP3770SSPState),
+        VMSTATE_TIMER_PTR_V(resp_timeout_timer, STMP3770SSPState, 6),
+        VMSTATE_TIMER_PTR_V(data_timeout_timer, STMP3770SSPState, 6),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -649,6 +807,11 @@ static int stmp3770_ssp_dma_handler(STMP3770DMAState *dma, int channel,
 void stmp3770_ssp_set_clk_rate(STMP3770SSPState *s, uint32_t sspclk_hz)
 {
     s->sspclk_rate = sspclk_hz;
+
+    stmp3770_ssp_cancel_resp_timeout(s);
+    stmp3770_ssp_cancel_data_timeout(s);
+    stmp3770_ssp_start_resp_timeout(s);
+    stmp3770_ssp_start_data_timeout(s);
 }
 
 void stmp3770_ssp_set_hclk_rate(STMP3770SSPState *s, uint32_t hclk_hz)

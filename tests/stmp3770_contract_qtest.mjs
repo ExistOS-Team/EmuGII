@@ -3953,6 +3953,182 @@ async function testSspDebugAndDmaStatusContract() {
   });
 }
 
+async function testSspTimeoutAndErrorStatusContract() {
+  await withMachine(async (machine) => {
+    const runBit = 1 << 29;
+    const enableBit = 1 << 16;
+    const getRespBit = 1 << 17;
+    const dataXferBit = 1 << 24;
+    const dmaEnableBit = 1 << 13;
+    const respTimeoutBit = 1 << 14;
+    const timeoutBit = 1 << 12;
+    const dataCrcErrBit = 1 << 13;
+    const ceataCcsErrBit = 1 << 10;
+    const respErrBit = 1 << 15;
+    const respCrcErrBit = 1 << 16;
+    const sdioIrqBit = 1 << 17;
+    const dmaSenseBit = 1 << 21;
+    const respTimeoutIrqBit = 1 << 27;
+    const respTimeoutEnBit = 1 << 26;
+    const dataTimeoutIrqBit = 1 << 25;
+    const dataTimeoutEnBit = 1 << 24;
+    const dataCrcIrqBit = 1 << 23;
+    const respErrIrqBit = 1 << 29;
+    const ceataCcsErrIrqBit = 1 << 19;
+    const sdioIrqSet = 0xC0000000;
+    const sdioIrqClear = 0x80000000;
+
+    // ungate SSP clock so SSPCLK is 24 MHz (XTAL bypass)
+    await machine.writel(CLKCTRL_BASE + 0x078, 0x80000000);
+
+    // release SFTRST/CLKGATE and clear default FIFO_UNDERRUN_IRQ
+    await machine.writel(SSP1_BASE + 0x008, 0xc0000000);
+    await machine.writel(SSP1_BASE + 0x068, 0x00200000);
+
+    // response timeout in SD/MMC command-only mode
+    await machine.writel(
+      SSP1_BASE + 0x060,
+      0x04002000 | (0x7 << 4) | 0x3,
+    );
+    await machine.writel(
+      SSP1_BASE + 0x000,
+      runBit | enableBit | getRespBit | 1,
+    );
+
+    await machine.clockStep(10000);
+
+    let status = await machine.readl(SSP1_BASE + 0x0c0);
+    assert.equal(
+      status & respTimeoutBit,
+      respTimeoutBit,
+      'SSP RESP_TIMEOUT must set after 64 SCK cycles with no response',
+    );
+    let ctrl1 = await machine.readl(SSP1_BASE + 0x060);
+    assert.equal(
+      ctrl1 & respTimeoutIrqBit,
+      respTimeoutIrqBit,
+      'SSP RESP_TIMEOUT_IRQ must be set on response timeout',
+    );
+    let raw0 = await machine.readl(ICOLL_BASE + 0x040);
+    assert.notEqual(
+      raw0 & (1 << 15),
+      0,
+      'SSP1 error must assert ICOLL source 15 when RESP_TIMEOUT_IRQ is enabled',
+    );
+
+    // clear RUN, then reset and prepare data timeout
+    await machine.writel(SSP1_BASE + 0x008, runBit);
+    await machine.writel(SSP1_BASE + 0x000, 0x80000000);
+    await machine.writel(SSP1_BASE + 0x008, 0xc0000000);
+    await machine.writel(SSP1_BASE + 0x068, 0x00200000);
+
+    // data timeout with TIMEOUT=1 (4096 SCK cycles) and DATA_XFER
+    await machine.writel(
+      SSP1_BASE + 0x060,
+      dataTimeoutEnBit | dmaEnableBit | (0x7 << 4) | 0x3,
+    );
+    await machine.writel(SSP1_BASE + 0x050, 0x00010000);
+    await machine.writel(
+      SSP1_BASE + 0x000,
+      runBit | dataXferBit | enableBit | 1,
+    );
+
+    await machine.clockStep(200000);
+
+    status = await machine.readl(SSP1_BASE + 0x0c0);
+    assert.equal(
+      status & timeoutBit,
+      timeoutBit,
+      'SSP TIMEOUT must set after TIMEOUT*4096 SCK cycles without data',
+    );
+    assert.equal(
+      status & dmaSenseBit,
+      dmaSenseBit,
+      'SSP DMASENSE must set when DMA-enabled data transfer times out',
+    );
+    ctrl1 = await machine.readl(SSP1_BASE + 0x060);
+    assert.equal(
+      ctrl1 & dataTimeoutIrqBit,
+      dataTimeoutIrqBit,
+      'SSP DATA_TIMEOUT_IRQ must be set on data timeout',
+    );
+    raw0 = await machine.readl(ICOLL_BASE + 0x040);
+    assert.notEqual(
+      raw0 & (1 << 15),
+      0,
+      'SSP1 error must assert ICOLL source 15 when DATA_TIMEOUT_IRQ is enabled',
+    );
+
+    // RUN rise clears sticky TIMEOUT/DMASENSE status
+    await machine.writel(SSP1_BASE + 0x008, runBit);
+    await machine.writel(
+      SSP1_BASE + 0x000,
+      runBit | dataXferBit | enableBit | 1,
+    );
+    status = await machine.readl(SSP1_BASE + 0x0c0);
+    assert.equal(
+      status & (timeoutBit | dmaSenseBit),
+      0,
+      'SSP TIMEOUT/DMASENSE must clear on RUN rise',
+    );
+    // clear RUN to avoid further timeouts
+    await machine.writel(SSP1_BASE + 0x008, runBit);
+
+    // software-set error statuses (DATA_CRC_ERR, CEATA_CCS_ERR, RESP_ERR)
+    await machine.writel(SSP1_BASE + 0x064, dataCrcIrqBit);
+    status = await machine.readl(SSP1_BASE + 0x0c0);
+    assert.equal(
+      status & dataCrcErrBit,
+      dataCrcErrBit,
+      'SSP DATA_CRC_ERR must mirror DATA_CRC_IRQ set',
+    );
+    assert.equal(
+      status & dmaSenseBit,
+      dmaSenseBit,
+      'SSP DMASENSE must set when DATA_CRC_ERR is set with DMA_ENABLE',
+    );
+    await machine.writel(SSP1_BASE + 0x068, dataCrcIrqBit);
+    status = await machine.readl(SSP1_BASE + 0x0c0);
+    assert.equal(
+      status & dataCrcErrBit,
+      dataCrcErrBit,
+      'SSP DATA_CRC_ERR must be sticky (not cleared by CTRL1_CLR)',
+    );
+
+    await machine.writel(SSP1_BASE + 0x064, ceataCcsErrIrqBit);
+    status = await machine.readl(SSP1_BASE + 0x0c0);
+    assert.equal(
+      status & ceataCcsErrBit,
+      ceataCcsErrBit,
+      'SSP CEATA_CCS_ERR must mirror CEATA_CCS_ERR_IRQ set',
+    );
+
+    await machine.writel(SSP1_BASE + 0x064, respErrIrqBit);
+    status = await machine.readl(SSP1_BASE + 0x0c0);
+    assert.equal(
+      status & (respErrBit | respCrcErrBit),
+      respErrBit | respCrcErrBit,
+      'SSP RESP_ERR and RESP_CRC_ERR must mirror RESP_ERR_IRQ set',
+    );
+
+    // SDIO_IRQ follows CTRL1 SDIO_IRQ (copy, not sticky)
+    await machine.writel(SSP1_BASE + 0x060, sdioIrqSet);
+    status = await machine.readl(SSP1_BASE + 0x0c0);
+    assert.equal(
+      status & sdioIrqBit,
+      sdioIrqBit,
+      'SSP SDIO_IRQ status must follow CTRL1 SDIO_IRQ set',
+    );
+    await machine.writel(SSP1_BASE + 0x068, sdioIrqClear);
+    status = await machine.readl(SSP1_BASE + 0x0c0);
+    assert.equal(
+      status & sdioIrqBit,
+      0,
+      'SSP SDIO_IRQ status must clear when CTRL1 SDIO_IRQ is cleared',
+    );
+  });
+}
+
 async function testGpmiTiming2Contract() {
   await withMachine(async (machine) => {
     await machine.writel(GPMI_BASE + 0x080, 0xffffffff);
@@ -7727,6 +7903,7 @@ const tests = [
   ['SSP CTRL1 RUN lock contract', testSspCtrl1RunLockContract],
   ['SSP RECV_TIMEOUT contract', testSspRecvTimeoutContract],
   ['SSP DEBUG and DMA status contract', testSspDebugAndDmaStatusContract],
+  ['SSP timeout and error status contract', testSspTimeoutAndErrorStatusContract],
   ['GPMI TIMING2 contract', testGpmiTiming2Contract],
   ['GPMI CTRL1 contract', testGpmiCtrl1Contract],
   ['GPMI ECC register contract', testGpmiEccRegisterContract],
