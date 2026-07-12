@@ -2977,6 +2977,135 @@ async function testUsbDeviceControlContract() {
   });
 }
 
+async function testUsbPortsc1AndOtgscContract() {
+  await withMachine(async (machine) => {
+    const PORTSC1_PE = 0x00000004;
+    const PORTSC1_PEC = 0x00000008;
+    const PORTSC1_CCS = 0x00000001;
+    const PORTSC1_CSC = 0x00000002;
+    const PORTSC1_OCC = 0x00000020;
+
+    /* Reset controller and select host mode for PORTSC1 host-only bits. */
+    await machine.writel(USB_BASE + 0x140, 0x00000002);
+    assert.equal(await machine.readl(USB_BASE + 0x140), 0x00080000);
+    await machine.writel(USB_BASE + 0x1a8, 0x00000003);
+    assert.equal(await machine.readl(USB_BASE + 0x1a8), 0x00000003);
+
+    /* PORTSC1: host-only PP/PR/SUSP/PE and always-writable fields. */
+    await machine.writel(USB_BASE + 0x184, 0x00000000);
+    await machine.writel(
+      USB_BASE + 0x184,
+      (0xF << 16) | (0x3 << 14) | (0x7 << 20) | (1 << 23) |
+        (1 << 12) | (1 << 8) | (1 << 7) | (1 << 6) | (1 << 2),
+    );
+    assert.equal(
+      await machine.readl(USB_BASE + 0x184),
+      0x00ffd1cc,
+      'USBCTRL PORTSC1 must expose host-mode PP/PR/SUSP/PE, always-writable bits, and PEC on PE 0->1 transition',
+    );
+
+    let portsc1 = await machine.readl(USB_BASE + 0x184);
+
+    /* W1C PEC while keeping PE asserted. */
+    await machine.writel(USB_BASE + 0x184, portsc1 | PORTSC1_PEC);
+    assert.equal(
+      (await machine.readl(USB_BASE + 0x184)) & PORTSC1_PEC,
+      0,
+      'USBCTRL PORTSC1 PEC must be W1C',
+    );
+
+    /* PE 1->0 transition re-sets PEC. */
+    portsc1 = await machine.readl(USB_BASE + 0x184);
+    await machine.writel(
+      USB_BASE + 0x184,
+      portsc1 & ~PORTSC1_PE & ~PORTSC1_PEC,
+    );
+    assert.equal(
+      await machine.readl(USB_BASE + 0x184),
+      0x00ffd1c8,
+      'USBCTRL PORTSC1 PEC must be set when PE transitions 1->0',
+    );
+
+    /* Re-enable PE: 0->1 transition sets PEC. */
+    portsc1 = await machine.readl(USB_BASE + 0x184);
+    await machine.writel(
+      USB_BASE + 0x184,
+      (portsc1 & ~PORTSC1_PEC) | PORTSC1_PE,
+    );
+    assert.equal(
+      await machine.readl(USB_BASE + 0x184),
+      0x00ffd1cc,
+      'USBCTRL PORTSC1 PEC must be set when PE transitions 0->1',
+    );
+
+    /* Disable PE and then W1C PEC while PE is 0. */
+    portsc1 = await machine.readl(USB_BASE + 0x184);
+    await machine.writel(
+      USB_BASE + 0x184,
+      portsc1 & ~PORTSC1_PE & ~PORTSC1_PEC,
+    );
+    assert.equal(
+      await machine.readl(USB_BASE + 0x184),
+      0x00ffd1c8,
+      'USBCTRL PORTSC1 PEC must be set when PE transitions 1->0',
+    );
+    portsc1 = await machine.readl(USB_BASE + 0x184);
+    await machine.writel(USB_BASE + 0x184, portsc1 | PORTSC1_PEC);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x184),
+      0x00ffd1c0,
+      'USBCTRL PORTSC1 PEC must be W1C when PE is 0',
+    );
+
+    /* CCS/CSC/OCC are read-only/W1C and must not be set by writes. */
+    portsc1 = await machine.readl(USB_BASE + 0x184);
+    await machine.writel(
+      USB_BASE + 0x184,
+      portsc1 | PORTSC1_CCS | PORTSC1_CSC | PORTSC1_OCC,
+    );
+    assert.equal(
+      await machine.readl(USB_BASE + 0x184),
+      0x00ffd1c0,
+      'USBCTRL PORTSC1 must ignore CCS writes and W1C-clear CSC/OCC when not pending',
+    );
+
+    /* OTGSC status/enable/control sections. */
+    assert.equal(
+      await machine.readl(USB_BASE + 0x1a4),
+      0x00000020,
+      'USBCTRL OTGSC must reset with IDPU set',
+    );
+
+    await machine.writel(USB_BASE + 0x1a4, 0xffffffff);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x1a4),
+      0x7f0000ff,
+      'USBCTRL OTGSC must expose all enable and control bits, with status W1C',
+    );
+
+    await machine.writel(USB_BASE + 0x1a4, 0x7f7f00ff);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x1a4),
+      0x7f0000ff,
+      'USBCTRL OTGSC status bits must be write-1-to-clear and not writable',
+    );
+
+    await machine.writel(USB_BASE + 0x1a4, 0x00000000);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x1a4),
+      0x00000000,
+      'USBCTRL OTGSC must clear enable and control bits',
+    );
+
+    await machine.writel(USB_BASE + 0x1a4, 0x00ff00ff);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x1a4),
+      0x000000ff,
+      'USBCTRL OTGSC must ignore status-input and reserved bits on writes',
+    );
+  });
+}
+
 async function testUsbEndpointRegisterContract() {
   await withMachine(async (machine) => {
     assert.equal(
@@ -7905,6 +8034,7 @@ const tests = [
   ['USBPHY register contract', testUsbPhyRegisterContract],
   ['USBCTRL capability register contract', testUsbCapabilityRegisterContract],
   ['USBCTRL device control contract', testUsbDeviceControlContract],
+  ['USBCTRL PORTSC1 and OTGSC contract', testUsbPortsc1AndOtgscContract],
   ['USBCTRL endpoint register contract', testUsbEndpointRegisterContract],
   ['USBCTRL GPTIMER contract', testUsbGptimerContract],
   ['SSP register layout and reset contract', testSspRegisterLayoutAndResetContract],

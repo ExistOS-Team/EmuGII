@@ -112,6 +112,45 @@
 #define PORTSC1_PE          (1U << 2)
 #define PORTSC1_CCS         (1U << 0)
 
+#define PORTSC1_CSC         (1U << 1)
+#define PORTSC1_PEC         (1U << 3)
+#define PORTSC1_OCC         (1U << 5)
+#define PORTSC1_OCA         (1U << 4)
+#define PORTSC1_FPR         (1U << 6)
+#define PORTSC1_SUSP        (1U << 7)
+#define PORTSC1_PHCD        (1U << 23)
+#define PORTSC1_WKOC        (1U << 22)
+#define PORTSC1_WKDC        (1U << 21)
+#define PORTSC1_WKCN        (1U << 20)
+#define PORTSC1_PFSC        (1U << 24)
+#define PORTSC1_PTC         (0xFU << 16)
+#define PORTSC1_PIC         (0x3U << 14)
+#define PORTSC1_PO          (1U << 13)
+#define PORTSC1_LS          (0x3U << 10)
+#define PORTSC1_HSP         (1U << 9)
+#define PORTSC1_PTW         (1U << 28)
+#define PORTSC1_PSPD        (0x3U << 26)
+#define PORTSC1_PTS         (0x3U << 30)
+#define PORTSC1_STS         (1U << 29)
+
+#define PORTSC1_W1C_MASK    (PORTSC1_CSC | PORTSC1_PEC | PORTSC1_OCC)
+#define PORTSC1_ALWAYS_RW   (PORTSC1_PTS | PORTSC1_STS | PORTSC1_PFSC | \
+                             PORTSC1_PHCD | PORTSC1_WKOC | PORTSC1_WKDC | \
+                             PORTSC1_WKCN | PORTSC1_PTC | PORTSC1_PIC | \
+                             PORTSC1_FPR)
+#define PORTSC1_HOST_RW     (PORTSC1_PP | PORTSC1_PR | PORTSC1_SUSP | PORTSC1_PE)
+#define PORTSC1_KNOWN_MASK  (PORTSC1_ALWAYS_RW | PORTSC1_HOST_RW | \
+                             PORTSC1_W1C_MASK | PORTSC1_PTW | PORTSC1_PSPD | \
+                             PORTSC1_PO | PORTSC1_LS | PORTSC1_HSP | \
+                             PORTSC1_OCA | PORTSC1_CCS)
+
+#define OTGSC_EN_MASK       0x7F000000U
+#define OTGSC_STATUS_MASK   0x007F0000U
+#define OTGSC_STATUS_INPUT_MASK 0x00007F00U
+#define OTGSC_CTRL_MASK     0x000000FFU
+#define OTGSC_KNOWN_MASK    (OTGSC_EN_MASK | OTGSC_STATUS_MASK | \
+                             OTGSC_STATUS_INPUT_MASK | OTGSC_CTRL_MASK)
+
 typedef struct STMP3770USBGPTimerCBInfo {
     STMP3770USBState *s;
     unsigned int idx;
@@ -295,9 +334,9 @@ static uint64_t usb_read(void *opaque, hwaddr offset, unsigned size)
     case REG_CONFIGFLAG:
         return 0;
     case REG_PORTSC1:
-        return s->portsc1;
+        return s->portsc1 & PORTSC1_KNOWN_MASK;
     case REG_OTGSC:
-        return s->otgsc;
+        return s->otgsc & OTGSC_KNOWN_MASK;
     case REG_USBMODE:
         return s->usbmode;
     case REG_ENDPTSETUPSTAT:
@@ -376,18 +415,47 @@ static void usb_write(void *opaque, hwaddr offset,
         s->endptnaken = (uint32_t)value & USBCTRL_ENDPOINT_BITMAP_MASK;
         break;
     case REG_PORTSC1:
-        /* ClearPortFeature / SetPortFeature emulation */
-        if (value & PORTSC1_PR) {
-            value &= ~PORTSC1_PR;
-            s->usbsts |= USBSTS_URI;
-            usb_update_irq(s);
+    {
+        uint32_t val = (uint32_t)value;
+        uint32_t writable = PORTSC1_ALWAYS_RW;
+        uint32_t old_portsc1 = s->portsc1;
+        bool old_pe = (old_portsc1 & PORTSC1_PE) != 0;
+
+        if ((s->usbmode & 0x3) == 0x3) {
+            /* Host mode: PP/PR/SUSP/PE are writable. */
+            writable |= PORTSC1_HOST_RW;
         }
-        s->portsc1 = (s->portsc1 & ~0x0075002C) | ((uint32_t)value & 0x0075002C);
-        s->portsc1 |= PORTSC1_PP | PORTSC1_PE | PORTSC1_CCS;
+
+        /* Update all writable, non-W1C fields. */
+        s->portsc1 &= ~writable;
+        s->portsc1 |= val & writable;
+
+        /* PEC is set on a PE transition (0->1 or 1->0). */
+        bool new_pe = (s->portsc1 & PORTSC1_PE) != 0;
+        if (old_pe != new_pe) {
+            s->portsc1 |= PORTSC1_PEC;
+        }
+
+        /* W1C: writing 1 clears CSC/PEC/OCC. */
+        s->portsc1 &= ~(val & PORTSC1_W1C_MASK);
+
+        s->portsc1 &= PORTSC1_KNOWN_MASK;
         break;
+    }
     case REG_OTGSC:
-        s->otgsc = (uint32_t)value;
+    {
+        uint32_t val = (uint32_t)value;
+
+        /* Status bits (22:16) are write-1-to-clear. */
+        s->otgsc &= ~(val & OTGSC_STATUS_MASK);
+
+        /* Enable (30:24) and control (7:0) fields are fully writable. */
+        s->otgsc &= ~(OTGSC_EN_MASK | OTGSC_CTRL_MASK);
+        s->otgsc |= val & (OTGSC_EN_MASK | OTGSC_CTRL_MASK);
+
+        s->otgsc &= OTGSC_KNOWN_MASK;
         break;
+    }
     case REG_USBMODE:
         if (!s->usbmode_written) {
             s->usbmode = (uint32_t)value & USBCTRL_USBMODE_WRITABLE_MASK;
