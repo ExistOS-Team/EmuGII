@@ -18,4 +18,6 @@
 #define TYPE_STMP3770_ICOLL "stmp3770-icoll"
 OBJECT_DECLARE_SIMPLE_TYPE(STMP3770ICOLLState, STMP3770_ICOLL)
 
+void stmp3770_icoll_set_hclk_rate(void *opaque, uint32_t hclk_hz);
+
 #endif /* HW_INTC_STMP3770_ICOLL_H */

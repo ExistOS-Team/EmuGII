@@ -382,6 +382,17 @@ static void stmp3770_realize(DeviceState *dev, Error **errp)
     stmp3770_clkctrl_set_dig_reset_callback(s->clkctrl, stmp3770_dig_reset, s);
     sysbus_mmio_map(SYS_BUS_DEVICE(s->clkctrl), 0, STMP3770_CLKCTRL_ADDR);
 
+    /*
+     * Connect ICOLL_BUSY to CLKCTRL for CPU clock gating during
+     * INTERRUPT_WAIT/WFI, and propagate HCLK rate changes to ICOLL
+     * so reset/multicycle delays use the real APBH/HCLK frequency.
+     */
+    sysbus_connect_irq(SYS_BUS_DEVICE(s->icoll), 2,
+                       qdev_get_gpio_in(DEVICE(s->clkctrl), 0));
+    stmp3770_clkctrl_set_hclk_rate_callback(s->clkctrl,
+                                            stmp3770_icoll_set_hclk_rate,
+                                            s->icoll);
+
     /* Realize power supply controller (POWER) */
     if (!sysbus_realize(SYS_BUS_DEVICE(s->power), errp)) {
         return;

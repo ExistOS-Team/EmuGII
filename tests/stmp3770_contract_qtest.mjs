@@ -5743,6 +5743,7 @@ async function testIcollCoreContract() {
 
     await machine.writel(ICOLL_BASE + 0x160, 0x00001000);
     await machine.writel(ICOLL_BASE + 0x060, 0x00000f00);
+    await machine.clockStep(84);
 
     const vector = await machine.readl(ICOLL_BASE + 0x000);
     const stat = await machine.readl(ICOLL_BASE + 0x030);
@@ -5769,6 +5770,7 @@ async function testIcollSameLevelPriorityContract() {
     await machine.writel(ICOLL_BASE + 0x028, 0xc0000000);
     await machine.writel(ICOLL_BASE + 0x160, 0x00001000);
     await machine.writel(ICOLL_BASE + 0x060, 0x0c00000c);
+    await machine.clockStep(84);
 
     assert.equal(
       await machine.readl(ICOLL_BASE + 0x000),
@@ -5803,6 +5805,7 @@ async function testIcollVectorAcknowledgeContract() {
     await machine.writel(ICOLL_BASE + 0x028, 0xc0000000);
     await machine.writel(ICOLL_BASE + 0x160, 0x00002000);
     await machine.writel(ICOLL_BASE + 0x060, 0x00000f0c);
+    await machine.clockStep(84);
 
     const highVector = await machine.readl(ICOLL_BASE + 0x000);
     assert.equal(highVector, 0x00002004, `ICOLL should select level 3 source first: got 0x${highVector.toString(16)}`);
@@ -5818,6 +5821,7 @@ async function testIcollVectorAcknowledgeContract() {
     );
 
     await machine.writel(ICOLL_BASE + 0x010, 0x00000008);
+    await machine.clockStep(84);
     const afterAcknowledge = await machine.readl(ICOLL_BASE + 0x000);
     assert.equal(
       afterAcknowledge,
@@ -5833,6 +5837,7 @@ async function testIcollArmRseModeContract() {
     await machine.writel(ICOLL_BASE + 0x024, 0x00040000);
     await machine.writel(ICOLL_BASE + 0x160, 0x00003000);
     await machine.writel(ICOLL_BASE + 0x060, 0x00000f0c);
+    await machine.clockStep(84);
 
     const highVector = await machine.readl(ICOLL_BASE + 0x000);
     assert.equal(highVector, 0x00003004, `ICOLL should select level 3 source first: got 0x${highVector.toString(16)}`);
@@ -5846,6 +5851,7 @@ async function testIcollArmRseModeContract() {
     );
 
     await machine.writel(ICOLL_BASE + 0x010, 0x00000008);
+    await machine.clockStep(84);
     const afterAcknowledge = await machine.readl(ICOLL_BASE + 0x000);
     assert.equal(
       afterAcknowledge,
@@ -5861,6 +5867,7 @@ async function testIcollNoNestingContract() {
     await machine.writel(ICOLL_BASE + 0x024, 0x00080000);
     await machine.writel(ICOLL_BASE + 0x160, 0x00004000);
     await machine.writel(ICOLL_BASE + 0x060, 0x0000000c);
+    await machine.clockStep(84);
 
     const lowVector = await machine.readl(ICOLL_BASE + 0x000);
     assert.equal(lowVector, 0x00004000, `ICOLL should select level 0 source first: got 0x${lowVector.toString(16)}`);
@@ -6058,6 +6065,7 @@ async function testIcollRequestHoldingContract() {
       'ICOLL DBGREQUEST0 must retain the closed holding-register snapshot until VECTOR acknowledgement',
     );
 
+    await machine.clockStep(84);
     await machine.writel(ICOLL_BASE + 0x000, 0);
     assert.equal(
       await machine.readl(ICOLL_BASE + 0x1b0),
@@ -6066,6 +6074,7 @@ async function testIcollRequestHoldingContract() {
     );
 
     await machine.writel(ICOLL_BASE + 0x010, 0x00000001);
+    await machine.clockStep(84);
     assert.equal(
       await machine.readl(ICOLL_BASE + 0x000),
       0x00006004,

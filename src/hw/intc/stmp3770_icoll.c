@@ -83,8 +83,14 @@
 #define ICOLL_DEBUGRD0          0xECA94567U
 #define ICOLL_DEBUGRD1          0x1356DA98U
 
-#define DEBUG_VECTOR_FSM_PENDING      0x004U
-#define DEBUG_VECTOR_FSM_ISR_RUNNING  0x020U
+/* Normal IRQ FSM states (DEBUG VECTOR_FSM field values from Chapter 5, Table 86) */
+enum {
+    ICOLL_FSM_IDLE = 0x000,
+    ICOLL_FSM_MULTICYCLE1 = 0x001,
+    ICOLL_FSM_MULTICYCLE2 = 0x002,
+    ICOLL_FSM_PENDING = 0x004,
+    ICOLL_FSM_ISR_RUNNING = 0x020,
+};
 
 /* APBH is synchronous with HCLK; cold reset leaves HCLK at 24 MHz. */
 #define ICOLL_RESET_CLOCK_HZ           24000000ULL
@@ -92,6 +98,7 @@
 #define ICOLL_SFTRST_DELAY_NS          \
     ((ICOLL_SFTRST_CLOCKS * NANOSECONDS_PER_SECOND + \
       ICOLL_RESET_CLOCK_HZ - 1) / ICOLL_RESET_CLOCK_HZ)
+#define ICOLL_MULTICYCLE_CLOCKS        1ULL
 
 /* STAT register bits */
 #define STAT_VECTOR_NUMBER_MASK 0x3F
@@ -104,6 +111,7 @@ struct STMP3770ICOLLState {
     MemoryRegion iomem;
     qemu_irq irq;               /* IRQ output to CPU */
     qemu_irq fiq;               /* FIQ output to CPU */
+    qemu_irq icoll_busy;        /* OR of all enabled IRQ requests to clock control */
 
     /* Registers */
     uint32_t ctrl;
@@ -128,8 +136,40 @@ struct STMP3770ICOLLState {
     uint32_t vector;
     bool vector_pending;
 
+    /* Normal IRQ FSM state and pending vector during the two HCLK delay */
+    uint32_t fsm_state;
+    uint32_t selected_vector;
+    uint32_t saved_vector;
+
+    /* APBH/HCLK rate for soft-reset and multicycle FSM delays */
+    uint32_t hclk_hz;
+
     QEMUTimer *sftrst_timer;
+    QEMUTimer *multicycle_timer;
 };
+
+static uint64_t stmp3770_icoll_sftrst_delay_ns(const STMP3770ICOLLState *s)
+{
+    uint32_t hz = s->hclk_hz ? s->hclk_hz : ICOLL_RESET_CLOCK_HZ;
+
+    return (ICOLL_SFTRST_CLOCKS * NANOSECONDS_PER_SECOND + hz - 1) / hz;
+}
+
+void stmp3770_icoll_set_hclk_rate(void *opaque, uint32_t hclk_hz)
+{
+    STMP3770ICOLLState *s = STMP3770_ICOLL(opaque);
+
+    s->hclk_hz = hclk_hz ? hclk_hz : ICOLL_RESET_CLOCK_HZ;
+}
+
+static uint64_t stmp3770_icoll_multicycle_step_ns(const STMP3770ICOLLState *s)
+{
+    uint32_t hz = s->hclk_hz ? s->hclk_hz : ICOLL_RESET_CLOCK_HZ;
+
+    return (ICOLL_MULTICYCLE_CLOCKS * NANOSECONDS_PER_SECOND + hz - 1) / hz;
+}
+
+static void stmp3770_icoll_multicycle_tick(void *opaque);
 
 static void stmp3770_icoll_reset(DeviceState *dev);
 static void stmp3770_icoll_update(STMP3770ICOLLState *s);
@@ -203,13 +243,53 @@ static bool stmp3770_icoll_fiq_pending(const STMP3770ICOLLState *s)
     return false;
 }
 
+static void stmp3770_icoll_find_candidate(const STMP3770ICOLLState *s,
+                                          uint64_t requests, int active_level,
+                                          uint32_t *selected_vector,
+                                          int *selected_level,
+                                          bool *has_candidate)
+{
+    int i;
+
+    *selected_vector = 0;
+    *selected_level = -1;
+    *has_candidate = false;
+
+    for (i = 0; i < 64; i++) {
+        bool active = (requests >> i) & 1;
+        int pri_reg = i / 4;
+        int pri_bit = (i % 4) * 8;
+        uint32_t pri_val = s->priority[pri_reg];
+        bool enabled = (pri_val >> (pri_bit + 2)) & 1;
+        int level = (pri_val >> pri_bit) & 0x3;
+
+        if (stmp3770_icoll_source_routes_to_fiq(s, i)) {
+            continue;
+        }
+        if (!active || !enabled) {
+            continue;
+        }
+        if (active_level >= 0 &&
+            ((s->ctrl & CTRL_NO_NESTING) || level <= active_level)) {
+            continue;
+        }
+
+        if (!*has_candidate || level > *selected_level ||
+            (level == *selected_level && i > *selected_vector)) {
+            *selected_vector = i;
+            *selected_level = level;
+        }
+        *has_candidate = true;
+    }
+}
+
 static uint32_t stmp3770_icoll_debug(const STMP3770ICOLLState *s)
 {
     uint64_t requests = stmp3770_icoll_debug_requests(s);
     uint32_t inservice = 0;
     uint32_t requests_by_level = 0;
     uint32_t level_requests = 0;
-    uint32_t vector_fsm = 0;
+    uint32_t vector_fsm = s->fsm_state;
     int source;
 
     for (int level = 0; level < 4; level++) {
@@ -230,14 +310,12 @@ static uint32_t stmp3770_icoll_debug(const STMP3770ICOLLState *s)
         }
     }
 
-    if (s->vector_pending) {
+    if (s->fsm_state == ICOLL_FSM_PENDING ||
+        s->fsm_state == ICOLL_FSM_ISR_RUNNING) {
         uint32_t priority = s->priority[s->vector / 4];
         uint32_t field = (s->vector % 4) * 8;
 
         level_requests = 1U << ((priority >> field) & 0x3);
-        vector_fsm = DEBUG_VECTOR_FSM_PENDING;
-    } else if (stmp3770_icoll_highest_active_level(s) >= 0) {
-        vector_fsm = DEBUG_VECTOR_FSM_ISR_RUNNING;
     }
 
     return (inservice << 28) |
@@ -307,100 +385,155 @@ static void stmp3770_icoll_write_ctrl(STMP3770ICOLLState *s, uint32_t val,
 
     if (!old_sftrst) {
         timer_mod(s->sftrst_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                  ICOLL_SFTRST_DELAY_NS);
+                  stmp3770_icoll_sftrst_delay_ns(s));
     }
+}
+
+static bool stmp3770_icoll_busy_from(const STMP3770ICOLLState *s,
+                                      uint64_t requests)
+{
+    int i;
+
+    for (i = 0; i < 64; i++) {
+        if (!(requests & (1ULL << i))) {
+            continue;
+        }
+        if (stmp3770_icoll_source_routes_to_fiq(s, i)) {
+            return true;
+        }
+        int pri_reg = i / 4;
+        int pri_bit = (i % 4) * 8;
+        if ((s->priority[pri_reg] >> (pri_bit + 2)) & 1) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static void stmp3770_icoll_update(STMP3770ICOLLState *s)
 {
-    int i;
     int active_level;
-    int selected_level = -1;
-    uint32_t selected_vector = 0;
-    bool has_candidate = false;
-    bool pending_fiq = false;
+    uint32_t selected_vector;
+    int selected_level;
+    bool has_candidate;
     bool irq_enabled = s->ctrl & CTRL_IRQ_FINAL_ENABLE;
     bool fiq_enabled = s->ctrl & CTRL_FIQ_FINAL_ENABLE;
-    uint64_t requests = stmp3770_icoll_live_requests(s);
+    uint64_t live = stmp3770_icoll_live_requests(s);
+    bool busy = stmp3770_icoll_busy_from(s, live) &&
+                !(s->ctrl & (CTRL_SFTRST | CTRL_CLKGATE));
+
+    qemu_set_irq(s->icoll_busy, busy);
 
     if (s->ctrl & (CTRL_SFTRST | CTRL_CLKGATE)) {
+        timer_del(s->multicycle_timer);
+        s->fsm_state = ICOLL_FSM_IDLE;
+        s->selected_vector = 0;
+        s->saved_vector = 0;
         s->vector = 0;
+        s->vector_pending = false;
+        s->request_holding = 0;
         qemu_set_irq(s->irq, 0);
         qemu_set_irq(s->fiq, 0);
         return;
     }
 
     if (s->ctrl & CTRL_BYPASS_FSM) {
-        s->request_holding = requests;
+        timer_del(s->multicycle_timer);
+        s->fsm_state = ICOLL_FSM_IDLE;
+        s->selected_vector = 0;
+        s->saved_vector = 0;
         s->vector_pending = false;
-        for (i = 63; i >= 0; i--) {
-            if ((requests & (1ULL << i)) &&
+        s->request_holding = live;
+        s->vector = 0;
+        for (int i = 63; i >= 0; i--) {
+            if ((live & (1ULL << i)) &&
                 !stmp3770_icoll_source_routes_to_fiq(s, i)) {
                 s->vector = i;
-                qemu_set_irq(s->irq, 0);
-                qemu_set_irq(s->fiq, fiq_enabled &&
-                             stmp3770_icoll_fiq_pending(s));
-                return;
+                break;
             }
         }
-
-        s->vector = 0;
         qemu_set_irq(s->irq, 0);
         qemu_set_irq(s->fiq, fiq_enabled && stmp3770_icoll_fiq_pending(s));
         return;
     }
 
-    if (!s->vector_pending) {
-        s->request_holding = requests;
-    }
-    requests = s->request_holding;
-
     active_level = stmp3770_icoll_highest_active_level(s);
     s->current_level = active_level >= 0 ? active_level : 0;
 
-    /* Check each interrupt source */
-    for (i = 0; i < 64; i++) {
-        bool active = (requests >> i) & 1;
-        int pri_reg = i / 4;
-        int pri_bit = (i % 4) * 8;
-        uint32_t pri_val = s->priority[pri_reg];
-        bool enabled = (pri_val >> (pri_bit + 2)) & 1;
-        int level = (pri_val >> pri_bit) & 0x3;
-
-        if (stmp3770_icoll_source_routes_to_fiq(s, i)) {
-            pending_fiq |= active;
-            continue;
+    /*
+     * During the two HCLK delay, the request holding register is closed.
+     * Re-evaluate the closed snapshot in case the priority of a captured
+     * source changes, but do not reopen the holding register.
+     */
+    if (s->fsm_state == ICOLL_FSM_MULTICYCLE1 ||
+        s->fsm_state == ICOLL_FSM_MULTICYCLE2) {
+        stmp3770_icoll_find_candidate(s, s->request_holding, active_level,
+                                      &selected_vector, &selected_level,
+                                      &has_candidate);
+        if (has_candidate) {
+            s->selected_vector = selected_vector;
+            /*
+             * If the timer was stopped (e.g. by CLKGATE), resume the
+             * remaining delay so the FSM can reach PENDING.
+             */
+            if (!timer_pending(s->multicycle_timer)) {
+                timer_mod(s->multicycle_timer,
+                          qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                          stmp3770_icoll_multicycle_step_ns(s));
+            }
+            qemu_set_irq(s->fiq, fiq_enabled && stmp3770_icoll_fiq_pending(s));
+            qemu_set_irq(s->irq, 0);
+            return;
         }
 
-        if (!active || !enabled) {
-            continue;
-        }
-
-        if (s->vector_pending ||
-            (active_level >= 0 &&
-             ((s->ctrl & CTRL_NO_NESTING) || level <= active_level))) {
-            continue;
-        }
-
-        /* Higher level wins; source number resolves ties within one level. */
-        if (!has_candidate || level > selected_level ||
-            (level == selected_level && i > selected_vector)) {
-            selected_vector = i;
-            selected_level = level;
-        }
-        has_candidate = true;
+        timer_del(s->multicycle_timer);
+        s->fsm_state = active_level >= 0 ? ICOLL_FSM_ISR_RUNNING
+                                         : ICOLL_FSM_IDLE;
+        s->vector = active_level >= 0 ? s->saved_vector : 0;
+        qemu_set_irq(s->fiq, fiq_enabled && stmp3770_icoll_fiq_pending(s));
+        qemu_set_irq(s->irq, 0);
+        return;
     }
 
-    if (!s->vector_pending && has_candidate) {
-        s->vector = selected_vector;
-        s->vector_pending = true;
-    } else if (!s->vector_pending && active_level < 0) {
+    /* A vector has been computed and is waiting for CPU acknowledgement. */
+    if (s->vector_pending) {
+        qemu_set_irq(s->fiq, fiq_enabled && stmp3770_icoll_fiq_pending(s));
+        qemu_set_irq(s->irq, irq_enabled && s->vector_pending);
+        return;
+    }
+
+    /* Normal operation: the holding register is open and samples live requests. */
+    s->request_holding = live;
+
+    stmp3770_icoll_find_candidate(s, s->request_holding, active_level,
+                                  &selected_vector, &selected_level,
+                                  &has_candidate);
+
+    if (has_candidate) {
+        s->saved_vector = s->vector;
         s->vector = 0;
+        s->selected_vector = selected_vector;
+        s->fsm_state = ICOLL_FSM_MULTICYCLE1;
+        timer_mod(s->multicycle_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  stmp3770_icoll_multicycle_step_ns(s));
+        qemu_set_irq(s->fiq, fiq_enabled && stmp3770_icoll_fiq_pending(s));
+        qemu_set_irq(s->irq, 0);
+        return;
     }
 
-    /* Update IRQ/FIQ outputs */
-    qemu_set_irq(s->irq, irq_enabled && s->vector_pending);
-    qemu_set_irq(s->fiq, fiq_enabled && pending_fiq);
+    /* No candidate: update the FSM state and clear the vector when idle. */
+    if (active_level < 0) {
+        s->fsm_state = ICOLL_FSM_IDLE;
+        s->vector = 0;
+    } else {
+        s->fsm_state = ICOLL_FSM_ISR_RUNNING;
+        /* s->vector already reflects the in-service interrupt. */
+    }
+
+    qemu_set_irq(s->fiq, fiq_enabled && stmp3770_icoll_fiq_pending(s));
+    qemu_set_irq(s->irq, 0);
 }
 
 static void stmp3770_icoll_set_irq(void *opaque, int irq, int level)
@@ -414,6 +547,29 @@ static void stmp3770_icoll_set_irq(void *opaque, int irq, int level)
     }
 
     stmp3770_icoll_update(s);
+}
+
+static void stmp3770_icoll_multicycle_tick(void *opaque)
+{
+    STMP3770ICOLLState *s = STMP3770_ICOLL(opaque);
+
+    switch (s->fsm_state) {
+    case ICOLL_FSM_MULTICYCLE1:
+        s->fsm_state = ICOLL_FSM_MULTICYCLE2;
+        timer_mod(s->multicycle_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  stmp3770_icoll_multicycle_step_ns(s));
+        break;
+    case ICOLL_FSM_MULTICYCLE2:
+        s->fsm_state = ICOLL_FSM_PENDING;
+        s->vector = s->selected_vector;
+        s->vector_pending = true;
+        qemu_set_irq(s->irq, (s->ctrl & CTRL_IRQ_FINAL_ENABLE) &&
+                             s->vector_pending);
+        break;
+    default:
+        break;
+    }
 }
 
 static uint64_t icoll_read_subword(uint32_t value, hwaddr offset, unsigned size)
@@ -437,6 +593,14 @@ static uint64_t stmp3770_icoll_read(void *opaque, hwaddr offset, unsigned size)
     STMP3770ICOLLState *s = STMP3770_ICOLL(opaque);
     hwaddr base = offset & ~0xFULL;
     uint32_t value = 0;
+
+    /*
+     * SET/CLR/TOG aliases are at offsets +0x4/+0x8/+0xC.  Per the STMP3770
+     * register conventions, reads from these aliases always return 0.
+     */
+    if (offset & 0xC) {
+        return 0;
+    }
 
     switch (base) {
     case REG_VECTOR:
@@ -572,6 +736,10 @@ static void stmp3770_icoll_write(void *opaque, hwaddr offset,
 
     switch (offset) {
     case REG_VECTOR:
+        /* VECTOR is a write-only side-effect register; it has no SET/CLR/TOG. */
+        if (is_set || is_clr || is_tog) {
+            return;
+        }
         stmp3770_icoll_enter_service(s);
         stmp3770_icoll_update(s);
         return;
@@ -586,6 +754,10 @@ static void stmp3770_icoll_write(void *opaque, hwaddr offset,
         break;
 
     case REG_LEVELACK:
+        /* LEVELACK has no SET/CLR/TOG aliases; only the primary offset is valid. */
+        if (is_set || is_clr || is_tog) {
+            return;
+        }
         for (int level = 0; level < 4; level++) {
             if (val & (1U << level)) {
                 s->level_active[level] = 0;
@@ -647,13 +819,18 @@ static void stmp3770_icoll_reset(DeviceState *dev)
     s->vbase = 0;
     s->vector = 0;
     s->vector_pending = false;
+    s->fsm_state = ICOLL_FSM_IDLE;
+    s->selected_vector = 0;
+    s->saved_vector = 0;
     s->raw_status = 0;
     s->request_holding = 0;
     s->current_level = 0;
     s->fiq_enable = 0;
     s->debugflag = 0;
+    s->hclk_hz = ICOLL_RESET_CLOCK_HZ;
 
     timer_del(s->sftrst_timer);
+    timer_del(s->multicycle_timer);
 
     for (i = 0; i < 16; i++) {
         s->priority[i] = 0;
@@ -676,9 +853,13 @@ static void stmp3770_icoll_init(Object *obj)
     /* IRQ and FIQ outputs to CPU */
     sysbus_init_irq(sbd, &s->irq);
     sysbus_init_irq(sbd, &s->fiq);
+    /* ICOLL_BUSY output to clock control for WFI/INTERRUPT_WAIT gating */
+    sysbus_init_irq(sbd, &s->icoll_busy);
 
     s->sftrst_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                    stmp3770_icoll_finish_soft_reset, s);
+    s->multicycle_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                       stmp3770_icoll_multicycle_tick, s);
 
     /* 64 IRQ inputs from peripherals */
     qdev_init_gpio_in(DEVICE(obj), stmp3770_icoll_set_irq, 64);
@@ -689,17 +870,21 @@ static void stmp3770_icoll_finalize(Object *obj)
     STMP3770ICOLLState *s = STMP3770_ICOLL(obj);
 
     timer_free(s->sftrst_timer);
+    timer_free(s->multicycle_timer);
 }
 
 static const VMStateDescription vmstate_stmp3770_icoll = {
     .name = TYPE_STMP3770_ICOLL,
-    .version_id = 3,
-    .minimum_version_id = 3,
+    .version_id = 5,
+    .minimum_version_id = 5,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(ctrl, STMP3770ICOLLState),
         VMSTATE_UINT32(vbase, STMP3770ICOLLState),
         VMSTATE_UINT32(vector, STMP3770ICOLLState),
         VMSTATE_BOOL(vector_pending, STMP3770ICOLLState),
+        VMSTATE_UINT32(fsm_state, STMP3770ICOLLState),
+        VMSTATE_UINT32(selected_vector, STMP3770ICOLLState),
+        VMSTATE_UINT32(saved_vector, STMP3770ICOLLState),
         VMSTATE_UINT32_ARRAY(priority, STMP3770ICOLLState, 16),
         VMSTATE_UINT64(raw_status, STMP3770ICOLLState),
         VMSTATE_UINT64(request_holding, STMP3770ICOLLState),
@@ -707,7 +892,9 @@ static const VMStateDescription vmstate_stmp3770_icoll = {
         VMSTATE_UINT32(current_level, STMP3770ICOLLState),
         VMSTATE_UINT8(fiq_enable, STMP3770ICOLLState),
         VMSTATE_UINT32(debugflag, STMP3770ICOLLState),
+        VMSTATE_UINT32(hclk_hz, STMP3770ICOLLState),
         VMSTATE_TIMER_PTR(sftrst_timer, STMP3770ICOLLState),
+        VMSTATE_TIMER_PTR(multicycle_timer, STMP3770ICOLLState),
         VMSTATE_END_OF_LIST()
     }
 };

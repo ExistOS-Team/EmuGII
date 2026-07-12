@@ -19,6 +19,7 @@
 
 #include "qemu/osdep.h"
 #include "hw/sysbus.h"
+#include "hw/irq.h"
 #include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
@@ -137,11 +138,14 @@ struct STMP3770CLKCTRLState {
 
     /* Clock state */
     bool pll_powered;
+    bool icoll_busy;
+    bool cpuclk_running;
+    qemu_irq cpuclk;
 
     STMP3770CLKCTRLDigResetFn dig_reset_cb;
     void *dig_reset_opaque;
-    STMP3770CLKCTRLHclkRateFn hclk_rate_cb[2];
-    void *hclk_rate_opaque[2];
+    STMP3770CLKCTRLHclkRateFn hclk_rate_cb[3];
+    void *hclk_rate_opaque[3];
     size_t hclk_rate_cb_count;
     STMP3770CLKCTRLGpmiRateFn gpmi_rate_cb;
     void *gpmi_rate_opaque;
@@ -337,6 +341,25 @@ static void stmp3770_clkctrl_write_cpu(uint32_t *target, uint32_t val,
     }
 }
 
+static void stmp3770_clkctrl_update_cpuclk(STMP3770CLKCTRLState *s)
+{
+    bool interrupt_wait = s->cpu & (1U << 12);
+    bool cpuclk_running = !(interrupt_wait && !s->icoll_busy);
+
+    if (cpuclk_running != s->cpuclk_running) {
+        s->cpuclk_running = cpuclk_running;
+        qemu_set_irq(s->cpuclk, cpuclk_running);
+    }
+}
+
+static void stmp3770_clkctrl_icoll_busy(void *opaque, int n, int level)
+{
+    STMP3770CLKCTRLState *s = STMP3770_CLKCTRL(opaque);
+
+    s->icoll_busy = level;
+    stmp3770_clkctrl_update_cpuclk(s);
+}
+
 static void stmp3770_clkctrl_write_hbus(uint32_t *target, uint32_t val,
                                         bool is_set, bool is_clr, bool is_tog)
 {
@@ -491,7 +514,10 @@ static uint64_t stmp3770_clkctrl_read(void *opaque, hwaddr offset, unsigned size
     STMP3770CLKCTRLState *s = STMP3770_CLKCTRL(opaque);
     uint32_t value = 0;
 
-    /* Handle SET/CLR/TOG - they read the same as base register */
+    /* SET/CLR/TOG aliases (offsets +0x4/+0x8/+0xC) are write-only and read as 0 */
+    if (offset & 0xC) {
+        return 0;
+    }
     offset &= ~0xF;
 
     switch (offset) {
@@ -597,6 +623,7 @@ static void stmp3770_clkctrl_write(void *opaque, hwaddr offset,
     case REG_CPU:
         target = &s->cpu;
         stmp3770_clkctrl_write_cpu(target, val, is_set, is_clr, is_tog);
+        stmp3770_clkctrl_update_cpuclk(s);
         stmp3770_clkctrl_notify_hclk_rate(s);
         return;
 
@@ -727,6 +754,9 @@ static void stmp3770_clkctrl_reset(DeviceState *dev)
 
     /* Clock state */
     s->pll_powered = false;
+    s->icoll_busy = false;
+    s->cpuclk_running = false;
+    stmp3770_clkctrl_update_cpuclk(s);
     stmp3770_clkctrl_notify_hclk_rate(s);
     stmp3770_clkctrl_notify_gpmi_rate(s);
 }
@@ -739,6 +769,12 @@ static void stmp3770_clkctrl_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &stmp3770_clkctrl_ops, s,
                          TYPE_STMP3770_CLKCTRL, 0x200);
     sysbus_init_mmio(sbd, &s->iomem);
+
+    /* ICOLL_BUSY input from the interrupt collector for CPU clock gating */
+    qdev_init_gpio_in(DEVICE(obj), stmp3770_clkctrl_icoll_busy, 1);
+
+    /* CPUCLK output: gates CLK_P when INTERRUPT_WAIT is set and no interrupt is pending */
+    sysbus_init_irq(sbd, &s->cpuclk);
 }
 
 static const VMStateDescription vmstate_stmp3770_clkctrl = {
