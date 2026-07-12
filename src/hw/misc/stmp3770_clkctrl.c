@@ -149,6 +149,9 @@ struct STMP3770CLKCTRLState {
     size_t hclk_rate_cb_count;
     STMP3770CLKCTRLGpmiRateFn gpmi_rate_cb;
     void *gpmi_rate_opaque;
+    STMP3770CLKCTRLSspRateFn ssp_rate_cb[2];
+    void *ssp_rate_opaque[2];
+    size_t ssp_rate_cb_count;
 };
 
 void stmp3770_clkctrl_set_dig_reset_callback(STMP3770CLKCTRLState *s,
@@ -242,6 +245,38 @@ uint32_t stmp3770_clkctrl_get_gpmi_rate(STMP3770CLKCTRLState *s)
     return ref_hz / div;
 }
 
+uint32_t stmp3770_clkctrl_get_ssp_rate(STMP3770CLKCTRLState *s)
+{
+    uint32_t io_frac;
+    uint32_t ref_hz;
+    uint32_t div;
+
+    if ((s->ssp & PERCLK_CLKGATE) != 0) {
+        return 0;
+    }
+
+    div = s->ssp & PERCLK_DIV_MASK_9;
+    if (div == 0) {
+        return 0;
+    }
+
+    if ((s->clkseq & CLKSEQ_BYPASS_SSP) != 0) {
+        ref_hz = 24000000;
+    } else {
+        if (!s->pll_powered || (s->frac & FRAC_CLKGATEIO) != 0) {
+            return 0;
+        }
+
+        io_frac = (s->frac & FRAC_IOFRAC_MASK) >> 24;
+        if (io_frac == 0) {
+            return 0;
+        }
+        ref_hz = 480000000ULL * 18 / io_frac;
+    }
+
+    return ref_hz / div;
+}
+
 static void stmp3770_clkctrl_notify_hclk_rate(STMP3770CLKCTRLState *s)
 {
     size_t i;
@@ -257,6 +292,16 @@ static void stmp3770_clkctrl_notify_gpmi_rate(STMP3770CLKCTRLState *s)
     if (s->gpmi_rate_cb) {
         s->gpmi_rate_cb(s->gpmi_rate_opaque,
                         stmp3770_clkctrl_get_gpmi_rate(s));
+    }
+}
+
+static void stmp3770_clkctrl_notify_ssp_rate(STMP3770CLKCTRLState *s)
+{
+    size_t i;
+    uint32_t ssp_hz = stmp3770_clkctrl_get_ssp_rate(s);
+
+    for (i = 0; i < s->ssp_rate_cb_count; i++) {
+        s->ssp_rate_cb[i](s->ssp_rate_opaque[i], ssp_hz);
     }
 }
 
@@ -279,6 +324,18 @@ void stmp3770_clkctrl_set_gpmi_rate_callback(STMP3770CLKCTRLState *s,
     s->gpmi_rate_cb = cb;
     s->gpmi_rate_opaque = opaque;
     stmp3770_clkctrl_notify_gpmi_rate(s);
+}
+
+void stmp3770_clkctrl_set_ssp_rate_callback(STMP3770CLKCTRLState *s,
+                                            STMP3770CLKCTRLSspRateFn cb,
+                                            void *opaque)
+{
+    if (s->ssp_rate_cb_count < ARRAY_SIZE(s->ssp_rate_cb)) {
+        s->ssp_rate_cb[s->ssp_rate_cb_count] = cb;
+        s->ssp_rate_opaque[s->ssp_rate_cb_count] = opaque;
+        s->ssp_rate_cb_count++;
+    }
+    stmp3770_clkctrl_notify_ssp_rate(s);
 }
 
 static uint32_t stmp3770_clkctrl_apply_sct(uint32_t current, uint32_t val,
@@ -612,6 +669,7 @@ static void stmp3770_clkctrl_write(void *opaque, hwaddr offset,
         s->pll_powered = (s->pllctrl0 & PLLCTRL0_POWER) != 0;
         stmp3770_clkctrl_notify_hclk_rate(s);
         stmp3770_clkctrl_notify_gpmi_rate(s);
+        stmp3770_clkctrl_notify_ssp_rate(s);
         return;
 
     case REG_PLLCTRL1:
@@ -659,6 +717,7 @@ static void stmp3770_clkctrl_write(void *opaque, hwaddr offset,
                                       PERCLK_DIV_MASK_9,
                                       PERCLK_DIV_MASK_9,
                                       is_set, is_clr, is_tog);
+        stmp3770_clkctrl_notify_ssp_rate(s);
         return;
 
     case REG_GPMI:
@@ -681,12 +740,14 @@ static void stmp3770_clkctrl_write(void *opaque, hwaddr offset,
         stmp3770_clkctrl_write_frac(target, val, is_set, is_clr, is_tog);
         stmp3770_clkctrl_notify_hclk_rate(s);
         stmp3770_clkctrl_notify_gpmi_rate(s);
+        stmp3770_clkctrl_notify_ssp_rate(s);
         return;
 
     case REG_CLKSEQ:
         stmp3770_clkctrl_write_clkseq(s, val, is_set, is_clr, is_tog);
         stmp3770_clkctrl_notify_hclk_rate(s);
         stmp3770_clkctrl_notify_gpmi_rate(s);
+        stmp3770_clkctrl_notify_ssp_rate(s);
         return;
 
     case REG_RESET:
@@ -759,6 +820,7 @@ static void stmp3770_clkctrl_reset(DeviceState *dev)
     stmp3770_clkctrl_update_cpuclk(s);
     stmp3770_clkctrl_notify_hclk_rate(s);
     stmp3770_clkctrl_notify_gpmi_rate(s);
+    stmp3770_clkctrl_notify_ssp_rate(s);
 }
 
 static void stmp3770_clkctrl_init(Object *obj)

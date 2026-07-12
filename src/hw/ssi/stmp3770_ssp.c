@@ -29,6 +29,12 @@
 #define SCT_CLR 0x8
 #define SCT_TOG 0xC
 
+/* HW_SSP_TIMING bit fields */
+#define SSP_TIMING_TIMEOUT_MASK 0xFFFF0000U
+#define SSP_TIMING_CLOCK_DIVIDE_SHIFT 8
+#define SSP_TIMING_CLOCK_DIVIDE_MASK 0x0000FF00U
+#define SSP_TIMING_CLOCK_RATE_MASK 0x000000FFU
+
 static inline bool stmp3770_ssp_enabled(STMP3770SSPState *s)
 {
     return (s->ctrl0 & (SSP_CTRL0_SFTRST | SSP_CTRL0_CLKGATE)) == 0;
@@ -49,6 +55,21 @@ static void stmp3770_ssp_apply_sct(uint32_t *reg, uint32_t value, int sct)
     default:
         *reg = value;
         break;
+    }
+}
+
+static void stmp3770_ssp_write_timing(STMP3770SSPState *s, uint32_t value, int sct)
+{
+    uint32_t old = s->timing;
+    uint32_t divide;
+
+    stmp3770_ssp_apply_sct(&s->timing, value, sct);
+
+    divide = (s->timing & SSP_TIMING_CLOCK_DIVIDE_MASK) >>
+             SSP_TIMING_CLOCK_DIVIDE_SHIFT;
+    if (divide != 0 && (divide < 2 || divide > 254 || (divide & 1))) {
+        s->timing = (s->timing & ~SSP_TIMING_CLOCK_DIVIDE_MASK) |
+                    (old & SSP_TIMING_CLOCK_DIVIDE_MASK);
     }
 }
 
@@ -115,6 +136,7 @@ static void stmp3770_ssp_reset(DeviceState *dev)
     s->sdresp[3] = 0;
     s->status = SSP_STATUS_RESET_VALUE;
     s->debug = 0;
+    s->sspclk_rate = 0;
 
     stmp3770_ssp_update_irq(s);
 }
@@ -246,7 +268,7 @@ static void stmp3770_ssp_write(void *opaque, hwaddr offset,
         stmp3770_ssp_apply_sct(&s->compmask, (uint32_t)value, sct);
         break;
     case SSP_TIMING:
-        stmp3770_ssp_apply_sct(&s->timing, (uint32_t)value, sct);
+        stmp3770_ssp_write_timing(s, (uint32_t)value, sct);
         break;
     case SSP_DATA:
         s->data = (uint32_t)value;
@@ -285,6 +307,8 @@ static void stmp3770_ssp_init(Object *obj)
     STMP3770SSPState *s = STMP3770_SSP(obj);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
+    s->sspclk_rate = 0;
+
     memory_region_init_io(&s->iomem, obj, &stmp3770_ssp_ops, s,
                           TYPE_STMP3770_SSP, 0x2000);
     sysbus_init_mmio(sbd, &s->iomem);
@@ -306,7 +330,7 @@ static int stmp3770_ssp_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_stmp3770_ssp = {
     .name = "stmp3770-ssp",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .post_load = stmp3770_ssp_post_load,
     .fields = (const VMStateField[]) {
@@ -322,6 +346,7 @@ static const VMStateDescription vmstate_stmp3770_ssp = {
         VMSTATE_UINT32(status, STMP3770SSPState),
         VMSTATE_UINT32(debug, STMP3770SSPState),
         VMSTATE_UINT32_V(words_remaining, STMP3770SSPState, 2),
+        VMSTATE_UINT32_V(sspclk_rate, STMP3770SSPState, 3),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -419,6 +444,11 @@ static int stmp3770_ssp_dma_handler(STMP3770DMAState *dma, int channel,
     }
 
     return 0;
+}
+
+void stmp3770_ssp_set_clk_rate(STMP3770SSPState *s, uint32_t sspclk_hz)
+{
+    s->sspclk_rate = sspclk_hz;
 }
 
 void stmp3770_ssp_set_dma(STMP3770SSPState *s, STMP3770DMAState *dma,

@@ -198,6 +198,11 @@ static void stmp3770_gpmi_rate_update(void *opaque, uint32_t gpmi_hz)
     stmp3770_gpmi_set_gpmi_rate(STMP3770_GPMI(opaque), gpmi_hz);
 }
 
+static void stmp3770_ssp_rate_update(void *opaque, uint32_t ssp_hz)
+{
+    stmp3770_ssp_set_clk_rate(STMP3770_SSP(opaque), ssp_hz);
+}
+
 static void stmp3770_init(Object *obj)
 {
     STMP3770State *s = STMP3770(obj);
@@ -633,6 +638,14 @@ static void stmp3770_realize(DeviceState *dev, Error **errp)
     /* Connect SSP1/SSP2 to APBH DMA channels 1/2 */
     stmp3770_ssp_set_dma(s->ssp[0], s->apbh_dma, 1);
     stmp3770_ssp_set_dma(s->ssp[1], s->apbh_dma, 2);
+
+    /* Propagate SSP clock rate changes to both SSP controllers. */
+    stmp3770_clkctrl_set_ssp_rate_callback(s->clkctrl,
+                                           stmp3770_ssp_rate_update,
+                                           s->ssp[0]);
+    stmp3770_clkctrl_set_ssp_rate_callback(s->clkctrl,
+                                           stmp3770_ssp_rate_update,
+                                           s->ssp[1]);
 
     /* APBX DMA channel IRQs */
     sysbus_connect_irq(SYS_BUS_DEVICE(s->apbx_dma), 0,

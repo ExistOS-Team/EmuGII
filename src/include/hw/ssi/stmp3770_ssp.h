@@ -92,9 +92,11 @@ struct STMP3770SSPState {
     uint32_t sdresp[4];
     uint32_t status;
     uint32_t debug;
+    uint32_t sspclk_rate;
 };
 
 void stmp3770_ssp_set_dma(STMP3770SSPState *s, STMP3770DMAState *dma,
                           int channel);
+void stmp3770_ssp_set_clk_rate(STMP3770SSPState *s, uint32_t sspclk_hz);
 
 #endif /* STMP3770_SSP_H */
