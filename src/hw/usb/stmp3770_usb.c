@@ -102,6 +102,10 @@
 #define USBCTRL_ENDPTCTRL0_RESET         0x00800080
 #define USBCTRL_ENDPTCTRLN_ACTION_MASK   0x00400040
 #define USBCTRL_ENDPTCTRLN_WRITABLE_MASK 0x00EF00EF
+#define ENDPTCTRLN_TXR               (1U << 22)
+#define ENDPTCTRLN_RXR               (1U << 6)
+#define ENDPTCTRLN_TXD               (1U << 17)
+#define ENDPTCTRLN_RXD               (1U << 1)
 
 #define USBCTRL_ID_RESET            0x0042FA05
 #define USBCTRL_ARC_GENERAL_RESET   0x00000015
@@ -554,11 +558,21 @@ static void usb_write(void *opaque, hwaddr offset,
                           ((uint32_t)value & USBCTRL_ENDPTCTRL0_WRITABLE_MASK);
         break;
     case REG_ENDPTCTRL1 ... REG_ENDPTCTRL4:
-        s->endptctrl[(offset - REG_ENDPTCTRL0) / 4] =
-            (uint32_t)value & USBCTRL_ENDPTCTRLN_WRITABLE_MASK;
-        s->endptctrl[(offset - REG_ENDPTCTRL0) / 4] &=
-            ~USBCTRL_ENDPTCTRLN_ACTION_MASK;
+    {
+        uint32_t idx = (offset - REG_ENDPTCTRL0) / 4;
+        uint32_t val = (uint32_t)value & USBCTRL_ENDPTCTRLN_WRITABLE_MASK;
+
+        /* TXR/RXR are self-clearing and reset the TXD/RXD data toggle. */
+        if (val & ENDPTCTRLN_TXR) {
+            val &= ~(ENDPTCTRLN_TXR | ENDPTCTRLN_TXD);
+        }
+        if (val & ENDPTCTRLN_RXR) {
+            val &= ~(ENDPTCTRLN_RXR | ENDPTCTRLN_RXD);
+        }
+
+        s->endptctrl[idx] = val;
         break;
+    }
     case REG_GPTIMER0LD:
     case REG_GPTIMER1LD:
         s->gptimer_load[(offset - REG_GPTIMER0LD) / 8] =

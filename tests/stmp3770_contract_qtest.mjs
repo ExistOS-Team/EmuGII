@@ -3206,8 +3206,22 @@ async function testUsbEndpointRegisterContract() {
     await machine.writel(USB_BASE + 0x1c4, 0xffffffff);
     assert.equal(
       await machine.readl(USB_BASE + 0x1c4),
-      0x00af00af,
-      'USBCTRL ENDPTCTRL1 must preserve only Table 320 writable fields',
+      0x00ad00ad,
+      'USBCTRL ENDPTCTRL1 must self-clear TXR/RXR and reset TXD/RXD',
+    );
+
+    /* TXR/RXR PID reset: setting TXD/RXD then asserting TXR/RXR clears them. */
+    await machine.writel(USB_BASE + 0x1c4, 0x00a300a3);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x1c4),
+      0x00a300a3,
+      'USBCTRL ENDPTCTRL1 must hold TXD/RXD when TXR/RXR are clear',
+    );
+    await machine.writel(USB_BASE + 0x1c4, 0x00e700e7);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x1c4),
+      0x00a500a5,
+      'USBCTRL ENDPTCTRL1 must clear TXD when TXR is set and RXD when RXR is set',
     );
 
     await machine.writel(USB_BASE + 0x17c, 0xffffffff);
