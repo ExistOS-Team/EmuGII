@@ -51,6 +51,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(STMP3770SSPState, STMP3770_SSP)
 #define SSP_STATUS_MS_PRESENT    (1U << 30)
 #define SSP_STATUS_SD_PRESENT    (1U << 29)
 #define SSP_STATUS_FIFO_FULL     (1U << 8)
+#define SSP_STATUS_FIFO_OVRFLW   (1U << 9)
 #define SSP_STATUS_FIFO_EMPTY    (1U << 5)
 #define SSP_STATUS_FIFO_UNDRFLW  (1U << 4)
 #define SSP_STATUS_CMD_BUSY      (1U << 3)
@@ -64,6 +65,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(STMP3770SSPState, STMP3770_SSP)
 #define SSP_CTRL1_ERROR_IRQ_ENABLE_MASK 0x55554000U
 #define SSP_CTRL1_FIFO_UNDERRUN_IRQ (1U << 21)
 #define SSP_CTRL1_FIFO_UNDERRUN_EN  (1U << 20)
+#define SSP_CTRL1_FIFO_OVERRUN_IRQ  (1U << 15)
+#define SSP_CTRL1_FIFO_OVERRUN_EN   (1U << 14)
 #define SSP_CTRL1_WORD_LENGTH_MASK  (0xFU << 4)
 #define SSP_CTRL1_RESET_VALUE (SSP_CTRL1_FIFO_UNDERRUN_IRQ | (8U << 4))
 
@@ -93,6 +96,7 @@ struct STMP3770SSPState {
     uint32_t status;
     uint32_t debug;
     uint32_t sspclk_rate;
+    uint8_t fifo_count;
 };
 
 void stmp3770_ssp_set_dma(STMP3770SSPState *s, STMP3770DMAState *dma,

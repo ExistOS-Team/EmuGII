@@ -3577,6 +3577,151 @@ async function testSspXferCountWordWidthContract() {
   });
 }
 
+async function testSspFifoOccupancyContract() {
+  await withMachine(async (machine) => {
+    const runBit = 1 << 29;
+    const fifoFullBit = 1 << 8;
+    const fifoOvrflwBit = 1 << 9;
+    const fifoEmptyBit = 1 << 5;
+    const fifoUndrflwBit = 1 << 4;
+    const fifoOverrunIrqBit = 1 << 15;
+    const fifoOverrunEnBit = 1 << 14;
+    const fifoUnderrunIrqBit = 1 << 21;
+    const fifoUnderrunEnBit = 1 << 20;
+
+    // release SFTRST/CLKGATE and clear default FIFO_UNDERRUN_IRQ status
+    await machine.writel(SSP1_BASE + 0x008, 0xc0000000);
+    await machine.writel(SSP1_BASE + 0x068, fifoUnderrunIrqBit);
+    await machine.writel(SSP1_BASE + 0x068, fifoOverrunIrqBit);
+
+    // reset state: empty FIFO
+    assert.equal(
+      (await machine.readl(SSP1_BASE + 0x0c0)) & fifoEmptyBit,
+      fifoEmptyBit,
+      'SSP STATUS.FIFO_EMPTY must be set at reset',
+    );
+    assert.equal(
+      (await machine.readl(SSP1_BASE + 0x0c0)) & fifoFullBit,
+      0,
+      'SSP STATUS.FIFO_FULL must be clear at reset',
+    );
+
+    // DATA write while RUN is clear fills the FIFO
+    await machine.writel(SSP1_BASE + 0x070, 0x12345678);
+    assert.equal(
+      (await machine.readl(SSP1_BASE + 0x0c0)) & fifoFullBit,
+      fifoFullBit,
+      'SSP DATA write while RUN is clear must set FIFO_FULL',
+    );
+    assert.equal(
+      (await machine.readl(SSP1_BASE + 0x0c0)) & fifoEmptyBit,
+      0,
+      'SSP DATA write while RUN is clear must clear FIFO_EMPTY',
+    );
+
+    // another DATA write while RUN is clear overflows
+    await machine.writel(SSP1_BASE + 0x070, 0x9abcdef0);
+    assert.equal(
+      (await machine.readl(SSP1_BASE + 0x0c0)) & fifoOvrflwBit,
+      fifoOvrflwBit,
+      'SSP DATA write on a full FIFO must set FIFO_OVRFLW',
+    );
+    assert.equal(
+      (await machine.readl(SSP1_BASE + 0x060)) & fifoOverrunIrqBit,
+      fifoOverrunIrqBit,
+      'SSP FIFO overrun must set CTRL1.FIFO_OVERRUN_IRQ',
+    );
+    // enable the overrun IRQ and route it to the ICOLL
+    await machine.writel(SSP1_BASE + 0x064, fifoOverrunIrqBit | fifoOverrunEnBit);
+    assert.equal(
+      (await machine.readl(ICOLL_BASE + 0x040)) & (1 << 15),
+      1 << 15,
+      'SSP FIFO overrun IRQ must assert ICOLL source 15 when enabled',
+    );
+    await machine.writel(SSP1_BASE + 0x068, fifoOverrunIrqBit);
+    await machine.writel(SSP1_BASE + 0x068, fifoOverrunEnBit);
+
+    // RUN rise clears the FIFO error flags and sets busy/full
+    await machine.writel(SSP1_BASE + 0x004, 0x20000000 | 1);
+    assert.equal(
+      (await machine.readl(SSP1_BASE + 0x0c0)) & fifoOvrflwBit,
+      0,
+      'SSP RUN rise must clear FIFO_OVRFLW',
+    );
+    assert.equal(
+      (await machine.readl(SSP1_BASE + 0x0c0)) & fifoFullBit,
+      fifoFullBit,
+      'SSP RUN rise must keep FIFO_FULL when a word is already loaded',
+    );
+    assert.equal(
+      (await machine.readl(SSP1_BASE + 0x0c0)) & 0xD,
+      0xD,
+      'SSP RUN rise must set BUSY, CMD_BUSY, DATA_BUSY',
+    );
+
+    // DATA read while RUN is set consumes the word
+    assert.equal(await machine.readl(SSP1_BASE + 0x070), 0x9abcdef0,
+      'SSP DATA read must return the most recently written DATA word');
+    assert.equal(
+      (await machine.readl(SSP1_BASE + 0x0c0)) & fifoEmptyBit,
+      fifoEmptyBit,
+      'SSP DATA read must set FIFO_EMPTY after consuming the word',
+    );
+    assert.equal(
+      (await machine.readl(SSP1_BASE + 0x000)) & runBit,
+      0,
+      'SSP RUN must clear after the single loaded word is consumed',
+    );
+
+    // another DATA read with RUN set and empty FIFO causes underflow
+    await machine.writel(SSP1_BASE + 0x004, 0x20000000 | 1);
+    await machine.writel(SSP1_BASE + 0x064, fifoUnderrunIrqBit | fifoUnderrunEnBit);
+    await machine.readl(SSP1_BASE + 0x070);
+    assert.equal(
+      (await machine.readl(SSP1_BASE + 0x0c0)) & fifoUndrflwBit,
+      fifoUndrflwBit,
+      'SSP DATA read with RUN set and empty FIFO must set FIFO_UNDRFLW',
+    );
+    assert.equal(
+      (await machine.readl(SSP1_BASE + 0x060)) & fifoUnderrunIrqBit,
+      fifoUnderrunIrqBit,
+      'SSP FIFO underrun must set CTRL1.FIFO_UNDERRUN_IRQ',
+    );
+    assert.equal(
+      (await machine.readl(ICOLL_BASE + 0x040)) & (1 << 15),
+      1 << 15,
+      'SSP FIFO underrun IRQ must assert ICOLL source 15 when enabled',
+    );
+  });
+}
+
+async function testSspCtrl1RunLockContract() {
+  await withMachine(async (machine) => {
+    // release SFTRST/CLKGATE, set WORD_LENGTH=8 and SSP_MODE=SPI
+    await machine.writel(SSP1_BASE + 0x008, 0xc0000000);
+    await machine.writel(SSP1_BASE + 0x068, 0xffffffff);
+    await machine.writel(SSP1_BASE + 0x064, 0x00000080);
+
+    // set RUN with XFER_COUNT=1 and then try to change WORD_LENGTH/SSP_MODE
+    await machine.writel(SSP1_BASE + 0x004, 0x20000000 | 1);
+    await machine.writel(SSP1_BASE + 0x060, 0x000000f0);
+    assert.equal(
+      await machine.readl(SSP1_BASE + 0x060),
+      0x00000080,
+      'SSP CTRL1.WORD_LENGTH and SSP_MODE must be locked while RUN is set',
+    );
+
+    // clear RUN and verify the fields can be changed again
+    await machine.writel(SSP1_BASE + 0x008, 0x20000000);
+    await machine.writel(SSP1_BASE + 0x060, 0x000000f0);
+    assert.equal(
+      await machine.readl(SSP1_BASE + 0x060),
+      0x000000f0,
+      'SSP CTRL1.WORD_LENGTH and SSP_MODE must be writable after RUN is clear',
+    );
+  });
+}
+
 async function testGpmiTiming2Contract() {
   await withMachine(async (machine) => {
     await machine.writel(GPMI_BASE + 0x080, 0xffffffff);
@@ -7347,6 +7492,8 @@ const tests = [
   ['SSP DATA empty read contract', testSspDataEmptyReadContract],
   ['SSP APBH DMA read/write contract', testSspDmaReadWriteContract],
   ['SSP XFER_COUNT word-width contract', testSspXferCountWordWidthContract],
+  ['SSP FIFO occupancy contract', testSspFifoOccupancyContract],
+  ['SSP CTRL1 RUN lock contract', testSspCtrl1RunLockContract],
   ['GPMI TIMING2 contract', testGpmiTiming2Contract],
   ['GPMI CTRL1 contract', testGpmiCtrl1Contract],
   ['GPMI ECC register contract', testGpmiEccRegisterContract],

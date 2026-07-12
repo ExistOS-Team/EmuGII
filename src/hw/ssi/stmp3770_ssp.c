@@ -89,6 +89,26 @@ static unsigned int stmp3770_ssp_bytes_per_word(STMP3770SSPState *s)
     return bytes_per_word ? bytes_per_word : 1;
 }
 
+static void stmp3770_ssp_fifo_set_empty(STMP3770SSPState *s)
+{
+    s->fifo_count = 0;
+    s->status |= SSP_STATUS_FIFO_EMPTY;
+    s->status &= ~SSP_STATUS_FIFO_FULL;
+}
+
+static void stmp3770_ssp_fifo_load(STMP3770SSPState *s)
+{
+    if (s->fifo_count) {
+        s->status |= SSP_STATUS_FIFO_OVRFLW;
+        s->ctrl1 |= SSP_CTRL1_FIFO_OVERRUN_IRQ;
+        stmp3770_ssp_update_irq(s);
+    }
+
+    s->fifo_count = 1;
+    s->status |= SSP_STATUS_FIFO_FULL;
+    s->status &= ~SSP_STATUS_FIFO_EMPTY;
+}
+
 static void stmp3770_ssp_complete_data_word(STMP3770SSPState *s)
 {
     if (s->words_remaining == 0) {
@@ -97,7 +117,7 @@ static void stmp3770_ssp_complete_data_word(STMP3770SSPState *s)
 
     s->words_remaining--;
 
-    s->status |= SSP_STATUS_FIFO_EMPTY;
+    stmp3770_ssp_fifo_set_empty(s);
 
     if (s->words_remaining == 0) {
         s->ctrl0 &= ~SSP_CTRL0_RUN;
@@ -131,6 +151,7 @@ static void stmp3770_ssp_reset(DeviceState *dev)
     s->status = SSP_STATUS_RESET_VALUE;
     s->debug = 0;
     s->sspclk_rate = 0;
+    s->fifo_count = 0;
 
     stmp3770_ssp_update_irq(s);
 }
@@ -168,7 +189,7 @@ static uint64_t stmp3770_ssp_read(void *opaque, hwaddr offset, unsigned size)
         return s->timing;
     case SSP_DATA:
         if ((s->ctrl0 & SSP_CTRL0_RUN) && stmp3770_ssp_enabled(s) &&
-            (s->status & SSP_STATUS_FIFO_EMPTY)) {
+            s->fifo_count == 0) {
             s->status |= SSP_STATUS_FIFO_UNDRFLW;
             s->ctrl1 |= SSP_CTRL1_FIFO_UNDERRUN_IRQ;
             stmp3770_ssp_update_irq(s);
@@ -237,17 +258,30 @@ static void stmp3770_ssp_write(void *opaque, hwaddr offset,
             if (s->words_remaining == 0) {
                 s->ctrl0 &= ~SSP_CTRL0_RUN;
             } else {
-                s->status |= SSP_STATUS_BUSY | SSP_STATUS_CMD_BUSY |
+                s->status = SSP_STATUS_PRESENT | SSP_STATUS_MS_PRESENT |
+                            SSP_STATUS_SD_PRESENT |
+                            SSP_STATUS_BUSY | SSP_STATUS_CMD_BUSY |
                             SSP_STATUS_DATA_BUSY;
-                s->status |= SSP_STATUS_FIFO_EMPTY;
+                if (s->fifo_count) {
+                    s->status |= SSP_STATUS_FIFO_FULL;
+                } else {
+                    s->status |= SSP_STATUS_FIFO_EMPTY;
+                }
             }
         }
         break;
     }
     case SSP_CTRL1:
+    {
+        uint32_t old_ctrl1 = s->ctrl1;
+
         stmp3770_ssp_apply_sct(&s->ctrl1, (uint32_t)value, sct);
+        if (s->ctrl0 & SSP_CTRL0_RUN) {
+            s->ctrl1 = (s->ctrl1 & ~0xFFU) | (old_ctrl1 & 0xFFU);
+        }
         stmp3770_ssp_update_irq(s);
         break;
+    }
     case SSP_CMD0:
         stmp3770_ssp_apply_sct(&s->cmd0, (uint32_t)value, sct);
         s->cmd0 &= SSP_CMD0_WRITABLE_MASK;
@@ -266,9 +300,11 @@ static void stmp3770_ssp_write(void *opaque, hwaddr offset,
         break;
     case SSP_DATA:
         s->data = (uint32_t)value;
-        if ((s->ctrl0 & SSP_CTRL0_RUN) && stmp3770_ssp_enabled(s)) {
-            s->status &= ~SSP_STATUS_FIFO_EMPTY;
-            stmp3770_ssp_complete_data_word(s);
+        if (stmp3770_ssp_enabled(s)) {
+            stmp3770_ssp_fifo_load(s);
+            if ((s->ctrl0 & SSP_CTRL0_RUN) && stmp3770_ssp_enabled(s)) {
+                stmp3770_ssp_complete_data_word(s);
+            }
         }
         break;
     case SSP_SDRESP0:
@@ -317,6 +353,9 @@ static int stmp3770_ssp_post_load(void *opaque, int version_id)
     if (version_id < 2 && (s->ctrl0 & SSP_CTRL0_RUN)) {
         s->words_remaining = s->ctrl0 & 0xffffU;
     }
+    if (version_id < 4) {
+        s->fifo_count = (s->status & SSP_STATUS_FIFO_FULL) ? 1 : 0;
+    }
     stmp3770_ssp_update_irq(s);
 
     return 0;
@@ -324,7 +363,7 @@ static int stmp3770_ssp_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_stmp3770_ssp = {
     .name = "stmp3770-ssp",
-    .version_id = 3,
+    .version_id = 4,
     .minimum_version_id = 1,
     .post_load = stmp3770_ssp_post_load,
     .fields = (const VMStateField[]) {
@@ -341,6 +380,7 @@ static const VMStateDescription vmstate_stmp3770_ssp = {
         VMSTATE_UINT32(debug, STMP3770SSPState),
         VMSTATE_UINT32_V(words_remaining, STMP3770SSPState, 2),
         VMSTATE_UINT32_V(sspclk_rate, STMP3770SSPState, 3),
+        VMSTATE_UINT8_V(fifo_count, STMP3770SSPState, 4),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -410,7 +450,7 @@ static int stmp3770_ssp_dma_handler(STMP3770DMAState *dma, int channel,
                 break;
             }
             stmp3770_ssp_dma_load_word(s, &src[i], bytes_per_word);
-            s->status &= ~SSP_STATUS_FIFO_EMPTY;
+            stmp3770_ssp_fifo_load(s);
             stmp3770_ssp_complete_data_word(s);
             if (!(s->ctrl0 & SSP_CTRL0_RUN)) {
                 i += bytes_per_word;
