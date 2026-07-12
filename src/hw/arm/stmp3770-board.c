@@ -27,6 +27,7 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "qapi/visitor.h"
 #include "hw/arm/stmp3770.h"
 #include "hw/boards.h"
 #include "hw/qdev-properties.h"
@@ -54,6 +55,14 @@ OBJECT_DECLARE_SIMPLE_TYPE(STMP3770BoardState, STMP3770_BOARD)
 struct STMP3770BoardState {
     MachineState parent_obj;
     STMP3770State soc;
+
+    /* Boot strap pins (modeled as board-level properties). */
+    uint8_t boot_lcd_rs;
+    uint8_t boot_lcd_data;
+
+    /* Boot state machine state, exposed for introspection. */
+    uint32_t boot_state;
+    uint32_t boot_mode;
 };
 
 static char *stmp3770_exec_dir_file(const char *name)
@@ -104,6 +113,234 @@ static BlockBackend *stmp3770_open_default_flash(const char *path)
     }
 
     return blk;
+}
+
+typedef enum {
+    STMP3770_BOOT_RESULT_WAIT,
+    STMP3770_BOOT_RESULT_LOADED,
+    STMP3770_BOOT_RESULT_FAILED,
+} STMP3770BootResult;
+
+typedef enum {
+    STMP3770_BOOT_MODE_USB,
+    STMP3770_BOOT_MODE_I2C,
+    STMP3770_BOOT_MODE_SPI1_FLASH,
+    STMP3770_BOOT_MODE_SPI2_FLASH,
+    STMP3770_BOOT_MODE_GPMI_ECC4,
+    STMP3770_BOOT_MODE_JTAG_WAIT,
+    STMP3770_BOOT_MODE_SPI2_EEPROM,
+    STMP3770_BOOT_MODE_SSP1_MMC,
+    STMP3770_BOOT_MODE_SSP2_MMC,
+    STMP3770_BOOT_MODE_GPMI_ECC8,
+    STMP3770_BOOT_MODE_RECOVERY,
+    STMP3770_BOOT_MODE_UNKNOWN,
+    STMP3770_BOOT_MODE_MAX,
+} STMP3770BootMode;
+
+typedef enum {
+    STMP3770_BOOT_STATE_INIT,
+    STMP3770_BOOT_STATE_SELECT,
+    STMP3770_BOOT_STATE_PORT_INIT,
+    STMP3770_BOOT_STATE_LOAD,
+    STMP3770_BOOT_STATE_EXEC,
+    STMP3770_BOOT_STATE_JTAG_WAIT,
+    STMP3770_BOOT_STATE_FAILED,
+} STMP3770BootState;
+
+static const char * const stmp3770_boot_mode_name[STMP3770_BOOT_MODE_MAX] = {
+    [STMP3770_BOOT_MODE_USB]         = "USB",
+    [STMP3770_BOOT_MODE_I2C]         = "I2C",
+    [STMP3770_BOOT_MODE_SPI1_FLASH]  = "SPI1 Flash",
+    [STMP3770_BOOT_MODE_SPI2_FLASH]  = "SPI2 Flash",
+    [STMP3770_BOOT_MODE_GPMI_ECC4]   = "GPMI ECC4",
+    [STMP3770_BOOT_MODE_JTAG_WAIT]   = "JTAG_WAIT",
+    [STMP3770_BOOT_MODE_SPI2_EEPROM] = "SPI2 EEPROM",
+    [STMP3770_BOOT_MODE_SSP1_MMC]    = "SSP1 MMC",
+    [STMP3770_BOOT_MODE_SSP2_MMC]    = "SSP2 MMC",
+    [STMP3770_BOOT_MODE_GPMI_ECC8]   = "GPMI ECC8",
+    [STMP3770_BOOT_MODE_RECOVERY]    = "Recovery",
+    [STMP3770_BOOT_MODE_UNKNOWN]     = "Unknown",
+};
+
+static STMP3770BootMode stmp3770_boot_mode_from_bm(uint8_t bm)
+{
+    switch (bm) {
+    case 0x0:
+        return STMP3770_BOOT_MODE_USB;
+    case 0x1:
+        return STMP3770_BOOT_MODE_I2C;
+    case 0x2:
+        return STMP3770_BOOT_MODE_SPI1_FLASH;
+    case 0x3:
+        return STMP3770_BOOT_MODE_SPI2_FLASH;
+    case 0x4:
+        return STMP3770_BOOT_MODE_GPMI_ECC4;
+    case 0x6:
+        return STMP3770_BOOT_MODE_JTAG_WAIT;
+    case 0x8:
+        return STMP3770_BOOT_MODE_SPI2_EEPROM;
+    case 0x9:
+        return STMP3770_BOOT_MODE_SSP1_MMC;
+    case 0xA:
+        return STMP3770_BOOT_MODE_SSP2_MMC;
+    case 0xC:
+        return STMP3770_BOOT_MODE_GPMI_ECC8;
+    default:
+        return STMP3770_BOOT_MODE_UNKNOWN;
+    }
+}
+
+static STMP3770BootMode stmp3770_boot_select(STMP3770BoardState *s)
+{
+    STMP3770State *soc = &s->soc;
+    uint32_t ocotp_rom0 = soc->ocotp->rom[0];
+    uint32_t rtc_persistent1 = soc->rtc->persistent[1];
+    bool force_recovery = rtc_persistent1 & 0x1;
+    bool disable_recovery = ocotp_rom0 & (1U << 2);
+    uint8_t bm;
+
+    if (force_recovery) {
+        /* ROM consumes the recovery latch once it has read it. */
+        soc->rtc->persistent[1] &= ~1U;
+    }
+
+    if (force_recovery && !disable_recovery) {
+        return STMP3770_BOOT_MODE_RECOVERY;
+    }
+
+    if (s->boot_lcd_rs & 0x1) {
+        bm = s->boot_lcd_data & 0xF;
+    } else {
+        bm = (ocotp_rom0 >> 24) & 0xF;
+    }
+
+    return stmp3770_boot_mode_from_bm(bm);
+}
+
+static STMP3770BootResult stmp3770_boot_load_usb(STMP3770BoardState *s,
+                                                 hwaddr *entry)
+{
+    return STMP3770_BOOT_RESULT_FAILED;
+}
+
+static STMP3770BootResult stmp3770_boot_load_i2c(STMP3770BoardState *s,
+                                                 hwaddr *entry)
+{
+    return STMP3770_BOOT_RESULT_FAILED;
+}
+
+static STMP3770BootResult stmp3770_boot_load_spi(STMP3770BoardState *s,
+                                                 hwaddr *entry, int port)
+{
+    return STMP3770_BOOT_RESULT_FAILED;
+}
+
+static STMP3770BootResult stmp3770_boot_load_ssp(STMP3770BoardState *s,
+                                                 hwaddr *entry, int port)
+{
+    return STMP3770_BOOT_RESULT_FAILED;
+}
+
+static STMP3770BootResult stmp3770_boot_load_gpmi(STMP3770BoardState *s,
+                                                  hwaddr *entry, bool ecc8)
+{
+    return STMP3770_BOOT_RESULT_FAILED;
+}
+
+static STMP3770BootResult stmp3770_boot_load(STMP3770BoardState *s,
+                                             hwaddr *entry)
+{
+    STMP3770BootMode mode = s->boot_mode;
+
+    switch (mode) {
+    case STMP3770_BOOT_MODE_USB:
+    case STMP3770_BOOT_MODE_RECOVERY:
+        return stmp3770_boot_load_usb(s, entry);
+    case STMP3770_BOOT_MODE_I2C:
+        return stmp3770_boot_load_i2c(s, entry);
+    case STMP3770_BOOT_MODE_SPI1_FLASH:
+        return stmp3770_boot_load_spi(s, entry, 1);
+    case STMP3770_BOOT_MODE_SPI2_FLASH:
+    case STMP3770_BOOT_MODE_SPI2_EEPROM:
+        return stmp3770_boot_load_spi(s, entry, 2);
+    case STMP3770_BOOT_MODE_SSP1_MMC:
+        return stmp3770_boot_load_ssp(s, entry, 1);
+    case STMP3770_BOOT_MODE_SSP2_MMC:
+        return stmp3770_boot_load_ssp(s, entry, 2);
+    case STMP3770_BOOT_MODE_GPMI_ECC4:
+        return stmp3770_boot_load_gpmi(s, entry, false);
+    case STMP3770_BOOT_MODE_GPMI_ECC8:
+        return stmp3770_boot_load_gpmi(s, entry, true);
+    case STMP3770_BOOT_MODE_JTAG_WAIT:
+        info_report("STMP3770 boot: JTAG_WAIT mode, waiting for debugger");
+        return STMP3770_BOOT_RESULT_WAIT;
+    case STMP3770_BOOT_MODE_UNKNOWN:
+    default:
+        return STMP3770_BOOT_RESULT_FAILED;
+    }
+}
+
+static STMP3770BootResult stmp3770_boot_run(STMP3770BoardState *s)
+{
+    hwaddr entry = STMP3770_SRAM_ADDR;
+
+    s->boot_state = STMP3770_BOOT_STATE_INIT;
+    s->boot_state = STMP3770_BOOT_STATE_SELECT;
+    s->boot_mode = stmp3770_boot_select(s);
+    info_report("STMP3770 boot: selected mode %s",
+                stmp3770_boot_mode_name[s->boot_mode]);
+    s->boot_state = STMP3770_BOOT_STATE_PORT_INIT;
+    s->boot_state = STMP3770_BOOT_STATE_LOAD;
+
+    STMP3770BootResult result = stmp3770_boot_load(s, &entry);
+    if (result == STMP3770_BOOT_RESULT_LOADED) {
+        s->boot_state = STMP3770_BOOT_STATE_EXEC;
+        s->soc.cpu.env.regs[15] = entry;
+    } else if (result == STMP3770_BOOT_RESULT_WAIT) {
+        s->boot_state = STMP3770_BOOT_STATE_JTAG_WAIT;
+    } else {
+        s->boot_state = STMP3770_BOOT_STATE_FAILED;
+    }
+
+    return result;
+}
+
+static void stmp3770_board_get_boot_lcd_rs(Object *obj, Visitor *v,
+                                           const char *name, void *opaque,
+                                           Error **errp)
+{
+    STMP3770BoardState *s = STMP3770_BOARD(obj);
+    uint8_t value = s->boot_lcd_rs;
+
+    visit_type_uint8(v, name, &value, errp);
+}
+
+static void stmp3770_board_set_boot_lcd_rs(Object *obj, Visitor *v,
+                                           const char *name, void *opaque,
+                                           Error **errp)
+{
+    STMP3770BoardState *s = STMP3770_BOARD(obj);
+
+    visit_type_uint8(v, name, &s->boot_lcd_rs, errp);
+}
+
+static void stmp3770_board_get_boot_lcd_data(Object *obj, Visitor *v,
+                                             const char *name, void *opaque,
+                                             Error **errp)
+{
+    STMP3770BoardState *s = STMP3770_BOARD(obj);
+    uint8_t value = s->boot_lcd_data;
+
+    visit_type_uint8(v, name, &value, errp);
+}
+
+static void stmp3770_board_set_boot_lcd_data(Object *obj, Visitor *v,
+                                             const char *name, void *opaque,
+                                             Error **errp)
+{
+    STMP3770BoardState *s = STMP3770_BOARD(obj);
+
+    visit_type_uint8(v, name, &s->boot_lcd_data, errp);
 }
 
 static void stmp3770_board_init(MachineState *machine)
@@ -201,6 +438,21 @@ static void stmp3770_board_init(MachineState *machine)
      */
 
     /*
+     * Run the ROM boot state machine.  It consumes LCD_RS/LCD_DATA[5:0],
+     * OCOTP_ROM0 and RTC_PERSISTENT1.FORCE_RECOVERY to select a boot port
+     * and, when a port loader succeeds, sets the CPU entry point.
+     */
+    {
+        STMP3770BootResult result = stmp3770_boot_run(s);
+        if (result == STMP3770_BOOT_RESULT_LOADED) {
+            return;
+        }
+        if (result == STMP3770_BOOT_RESULT_WAIT) {
+            return;
+        }
+    }
+
+    /*
      * 3. No external DRAM on HP 39gII
      *
      * HP 39gII has NO external DRAM - only 512KB on-chip SRAM.
@@ -270,6 +522,20 @@ static void stmp3770_board_class_init(ObjectClass *oc, const void *data)
     mc->is_default = true;
     mc->default_ram_size = STMP3770_BOARD_RAM_DEFAULT;
     mc->default_ram_id = "stmp3770.dram";
+
+    object_class_property_add(oc, "boot-lcd-rs", "uint8",
+                              stmp3770_board_get_boot_lcd_rs,
+                              stmp3770_board_set_boot_lcd_rs,
+                              NULL, NULL);
+    object_class_property_set_description(oc, "boot-lcd-rs",
+        "LCD_RS boot strap pin (0 = use OCOTP, 1 = use LCD_DATA[5:0])");
+
+    object_class_property_add(oc, "boot-lcd-data", "uint8",
+                              stmp3770_board_get_boot_lcd_data,
+                              stmp3770_board_set_boot_lcd_data,
+                              NULL, NULL);
+    object_class_property_set_description(oc, "boot-lcd-data",
+        "LCD_DATA[5:0] boot strap vector when boot-lcd-rs is 1");
 }
 
 static const TypeInfo stmp3770_board_type = {
