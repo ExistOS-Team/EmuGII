@@ -6454,8 +6454,8 @@ async function testDcpKeyAndContextRegisterContract() {
     await machine.writel(DCP_BASE + 0x060, 0x00000033);
     assert.equal(
       await machine.readl(DCP_BASE + 0x070),
-      0xa5a55a5a,
-      'DCP KEYDATA must expose the selected stored key word',
+      0,
+      'DCP KEYDATA must read as zero (key storage is write-only per PDF 15.2.2.1)',
     );
   });
 }
@@ -6623,6 +6623,719 @@ async function testDcpSctAliasContract() {
       await machine.readl(DCP_BASE + 0x1a0),
       0x00ff0000,
       'DCP CH2STAT_TOG must toggle documented error bits',
+    );
+  });
+}
+
+const DCP_PKT_INTERRUPT = 0x00000001;
+const DCP_PKT_DECR_SEMA = 0x00000002;
+const DCP_PKT_CHAIN = 0x00000004;
+const DCP_PKT_ENABLE_CIPHER = 0x00000020;
+const DCP_PKT_ENABLE_HASH = 0x00000040;
+const DCP_PKT_CIPHER_ENCRYPT = 0x00000100;
+const DCP_PKT_CIPHER_INIT = 0x00000200;
+const DCP_PKT_PAYLOAD_KEY = 0x00000800;
+const DCP_PKT_HASH_INIT = 0x00001000;
+const DCP_PKT_HASH_TERM = 0x00002000;
+const DCP_PKT_CHECK_HASH = 0x00004000;
+const DCP_PKT_ALL_SWAPS = 0x00fc0000;
+
+async function dcpEnableChannel0(machine) {
+  await machine.writel(DCP_BASE + 0x008, 0xc0000000);
+  await machine.writel(DCP_BASE + 0x024, 0x00000001);
+  await machine.writel(DCP_BASE + 0x004, 0x00000001);
+}
+
+async function dcpWriteDescriptor(machine, addr, fields) {
+  const {
+    next = 0, ctrl0, ctrl1 = 0, source = 0, destination = 0,
+    size = 0, payload = 0,
+  } = fields;
+  await machine.writel(addr + 0x00, next);
+  await machine.writel(addr + 0x04, ctrl0);
+  await machine.writel(addr + 0x08, ctrl1);
+  await machine.writel(addr + 0x0c, source);
+  await machine.writel(addr + 0x10, destination);
+  await machine.writel(addr + 0x14, size);
+  await machine.writel(addr + 0x18, payload);
+  await machine.writel(addr + 0x1c, 0);
+}
+
+async function dcpKickChannel0(machine, descriptor, semaphore) {
+  await machine.writel(DCP_BASE + 0x100, descriptor);
+  await machine.writel(DCP_BASE + 0x110, semaphore);
+}
+
+async function dcpKick(machine, channel, descriptor, semaphore) {
+  await machine.writel(DCP_BASE + 0x100 + channel * 0x40, descriptor);
+  await machine.writel(DCP_BASE + 0x110 + channel * 0x40, semaphore);
+}
+
+async function testDcpAes128EcbContract() {
+  await withMachine(async (machine) => {
+    await dcpEnableChannel0(machine);
+
+    /* FIPS-197 Appendix B vector via payload key in natural byte order. */
+    const payload = 0x00000600;
+    const source = 0x00000700;
+    const destination = 0x00000800;
+    const descriptor = 0x00000100;
+    for (const [i, word] of [0x03020100, 0x07060504, 0x0b0a0908, 0x0f0e0d0c].entries()) {
+      await machine.writel(payload + 4 * i, word);
+    }
+    for (const [i, word] of [0x33221100, 0x77665544, 0xbbaa9988, 0xffeeddcc].entries()) {
+      await machine.writel(source + 4 * i, word);
+    }
+    await dcpWriteDescriptor(machine, descriptor, {
+      ctrl0: (0x25 << 24) | DCP_PKT_ALL_SWAPS | DCP_PKT_PAYLOAD_KEY |
+        DCP_PKT_CIPHER_ENCRYPT | DCP_PKT_ENABLE_CIPHER |
+        DCP_PKT_DECR_SEMA | DCP_PKT_INTERRUPT,
+      source,
+      destination,
+      size: 16,
+      payload,
+    });
+    await dcpKickChannel0(machine, descriptor, 1);
+    assert.deepEqual(
+      [
+        await machine.readl(destination),
+        await machine.readl(destination + 4),
+        await machine.readl(destination + 8),
+        await machine.readl(destination + 12),
+      ],
+      [0xd8e0c469, 0x30047b6a, 0x80b7cdd8, 0x5ac5b470],
+      'DCP AES-128 ECB encrypt must reproduce the FIPS-197 known answer',
+    );
+    assert.equal(
+      await machine.readl(descriptor + 0x1c),
+      0x25000001,
+      'DCP AES descriptor must complete with its command tag',
+    );
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x110),
+      0,
+      'DCP AES descriptor must consume the channel semaphore',
+    );
+
+    /* Same vector via the KEYDATA key storage, no swaps (PDF key order). */
+    await machine.writel(DCP_BASE + 0x060, 0);
+    for (const word of [0x0c0d0e0f, 0x08090a0b, 0x04050607, 0x00010203]) {
+      await machine.writel(DCP_BASE + 0x070, word);
+    }
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x070),
+      0,
+      'DCP KEYDATA must read back as zero after key programming (write-only)',
+    );
+    const source2 = 0x00000900;
+    const destination2 = 0x00000a00;
+    const descriptor2 = 0x00000140;
+    for (const [i, word] of [0xccddeeff, 0x8899aabb, 0x44556677, 0x00112233].entries()) {
+      await machine.writel(source2 + 4 * i, word);
+    }
+    await dcpWriteDescriptor(machine, descriptor2, {
+      ctrl0: (0x5a << 24) | DCP_PKT_CIPHER_ENCRYPT | DCP_PKT_ENABLE_CIPHER |
+        DCP_PKT_DECR_SEMA | DCP_PKT_INTERRUPT,
+      source: source2,
+      destination: destination2,
+      size: 16,
+    });
+    await dcpKickChannel0(machine, descriptor2, 1);
+    assert.deepEqual(
+      [
+        await machine.readl(destination2),
+        await machine.readl(destination2 + 4),
+        await machine.readl(destination2 + 8),
+        await machine.readl(destination2 + 12),
+      ],
+      [0x70b4c55a, 0xd8cdb780, 0x6a7b0430, 0x69c4e0d8],
+      'DCP AES-128 ECB with the key RAM and no swaps must use the PDF key word order',
+    );
+  });
+}
+
+async function testDcpAes128CbcContract() {
+  await withMachine(async (machine) => {
+    await dcpEnableChannel0(machine);
+
+    /* Key 000102...0f, IV a0a1...af, plaintext 0001...1f (natural order). */
+    const payload = 0x00000600;
+    const source = 0x00000700;
+    const destination = 0x00000800;
+    const descriptor = 0x00000100;
+    for (const [i, word] of [0x03020100, 0x07060504, 0x0b0a0908, 0x0f0e0d0c].entries()) {
+      await machine.writel(payload + 4 * i, word);
+    }
+    for (const [i, word] of [0xa3a2a1a0, 0xa7a6a5a4, 0xabaaa9a8, 0xafaeadac].entries()) {
+      await machine.writel(payload + 16 + 4 * i, word);
+    }
+    const plainWords = [
+      0x03020100, 0x07060504, 0x0b0a0908, 0x0f0e0d0c,
+      0x13121110, 0x17161514, 0x1b1a1918, 0x1f1e1d1c,
+    ];
+    for (const [i, word] of plainWords.entries()) {
+      await machine.writel(source + 4 * i, word);
+    }
+    await dcpWriteDescriptor(machine, descriptor, {
+      ctrl0: (0x11 << 24) | DCP_PKT_ALL_SWAPS | DCP_PKT_PAYLOAD_KEY |
+        DCP_PKT_CIPHER_INIT | DCP_PKT_CIPHER_ENCRYPT | DCP_PKT_ENABLE_CIPHER |
+        DCP_PKT_DECR_SEMA | DCP_PKT_INTERRUPT,
+      ctrl1: 0x00000010,
+      source,
+      destination,
+      size: 32,
+      payload,
+    });
+    await dcpKickChannel0(machine, descriptor, 1);
+    const cipherWords = [
+      0xb6a8f1fe, 0x3ac4f025, 0x23b60871, 0xca90fba6,
+      0x8993be81, 0x4afa167d, 0x81f347a3, 0x6a7769e1,
+    ];
+    for (const [i, word] of cipherWords.entries()) {
+      assert.equal(
+        await machine.readl(destination + 4 * i),
+        word,
+        `DCP AES-128 CBC encrypt word ${i} must match the known answer`,
+      );
+    }
+
+    /* Decrypt the ciphertext back with the same key and IV. */
+    const destination2 = 0x00000900;
+    const descriptor2 = 0x00000140;
+    await dcpWriteDescriptor(machine, descriptor2, {
+      ctrl0: (0x22 << 24) | DCP_PKT_ALL_SWAPS | DCP_PKT_PAYLOAD_KEY |
+        DCP_PKT_CIPHER_INIT | DCP_PKT_ENABLE_CIPHER |
+        DCP_PKT_DECR_SEMA | DCP_PKT_INTERRUPT,
+      ctrl1: 0x00000010,
+      source: destination,
+      destination: destination2,
+      size: 32,
+      payload,
+    });
+    await dcpKickChannel0(machine, descriptor2, 1);
+    for (const [i, word] of plainWords.entries()) {
+      assert.equal(
+        await machine.readl(destination2 + 4 * i),
+        word,
+        `DCP AES-128 CBC decrypt round-trip word ${i} must restore the plaintext`,
+      );
+    }
+  });
+}
+
+async function testDcpSha1Contract() {
+  await withMachine(async (machine) => {
+    await dcpEnableChannel0(machine);
+
+    /* Single-packet SHA-1 of "abc" (FIPS 180-1 A.1 vector). */
+    const source = 0x00000700;
+    const payload = 0x00000780;
+    const descriptor = 0x00000100;
+    await machine.writel(source, 0x00636261);
+    await dcpWriteDescriptor(machine, descriptor, {
+      ctrl0: (0x33 << 24) | DCP_PKT_HASH_INIT | DCP_PKT_HASH_TERM |
+        DCP_PKT_ENABLE_HASH | DCP_PKT_DECR_SEMA | DCP_PKT_INTERRUPT,
+      source,
+      size: 3,
+      payload,
+    });
+    await dcpKickChannel0(machine, descriptor, 1);
+    assert.deepEqual(
+      [
+        await machine.readl(payload),
+        await machine.readl(payload + 4),
+        await machine.readl(payload + 8),
+        await machine.readl(payload + 12),
+        await machine.readl(payload + 16),
+      ],
+      [0xa9993e36, 0x4706816a, 0xba3e2571, 0x7850c26c, 0x9cd0d89d],
+      'DCP SHA-1 must hash "abc" to the FIPS 180-1 known answer',
+    );
+
+    /* Chained two-packet hash of 'a' * 64 + "abc" (init, then terminate). */
+    const source2 = 0x00000800;
+    const payload2 = 0x00000880;
+    const descriptor2 = 0x00000180;
+    const descriptor3 = 0x000001c0;
+    for (let i = 0; i < 16; i++) {
+      await machine.writel(source2 + 4 * i, 0x61616161);
+    }
+    await machine.writel(source2 + 0x40, 0x00636261);
+    await dcpWriteDescriptor(machine, descriptor2, {
+      next: descriptor3,
+      ctrl0: (0x44 << 24) | DCP_PKT_HASH_INIT | DCP_PKT_ENABLE_HASH |
+        DCP_PKT_CHAIN | DCP_PKT_DECR_SEMA,
+      source: source2,
+      size: 64,
+    });
+    await dcpWriteDescriptor(machine, descriptor3, {
+      ctrl0: (0x55 << 24) | DCP_PKT_HASH_TERM | DCP_PKT_ENABLE_HASH |
+        DCP_PKT_DECR_SEMA | DCP_PKT_INTERRUPT,
+      source: source2 + 0x40,
+      size: 3,
+      payload: payload2,
+    });
+    await dcpKickChannel0(machine, descriptor2, 2);
+    assert.equal(
+      await machine.readl(descriptor2 + 0x1c),
+      0x44000001,
+      'DCP chained hash init descriptor must complete first',
+    );
+    await machine.writel(DCP_BASE + 0x110, 0);
+    assert.equal(
+      await machine.readl(descriptor3 + 0x1c),
+      0x55000001,
+      'DCP chained hash terminate descriptor must complete after re-kick',
+    );
+    assert.deepEqual(
+      [
+        await machine.readl(payload2),
+        await machine.readl(payload2 + 4),
+        await machine.readl(payload2 + 8),
+        await machine.readl(payload2 + 12),
+        await machine.readl(payload2 + 16),
+      ],
+      [0xa5177e48, 0xd19a714d, 0x0463dbea, 0xfaab7f5c, 0x6d140ff3],
+      'DCP SHA-1 must continue hashing across chained descriptors',
+    );
+  });
+}
+
+async function testDcpCrc32Contract() {
+  await withMachine(async (machine) => {
+    await dcpEnableChannel0(machine);
+
+    /* DCP CRC-32: init 0xffffffff, zero-padded to words, no final xor. */
+    const source = 0x00000700;
+    const payload = 0x00000780;
+    const descriptor = 0x00000100;
+    await machine.writel(source, 0x00636261);
+    await dcpWriteDescriptor(machine, descriptor, {
+      ctrl0: (0x66 << 24) | DCP_PKT_HASH_INIT | DCP_PKT_HASH_TERM |
+        DCP_PKT_ENABLE_HASH | DCP_PKT_DECR_SEMA | DCP_PKT_INTERRUPT,
+      ctrl1: 0x00010000,
+      source,
+      size: 3,
+      payload,
+    });
+    await dcpKickChannel0(machine, descriptor, 1);
+    assert.equal(
+      await machine.readl(payload),
+      0x58a297af,
+      'DCP CRC-32 of "abc" must use the PDF modified CRC-32 contract',
+    );
+
+    /* Non-word-aligned 9-byte buffer exercises the zero padding. */
+    const source2 = 0x00000800;
+    const payload2 = 0x00000880;
+    const descriptor2 = 0x00000140;
+    await machine.writel(source2, 0x34333231);
+    await machine.writel(source2 + 4, 0x38373635);
+    await machine.writel(source2 + 8, 0x00000039);
+    await dcpWriteDescriptor(machine, descriptor2, {
+      ctrl0: (0x77 << 24) | DCP_PKT_HASH_INIT | DCP_PKT_HASH_TERM |
+        DCP_PKT_ENABLE_HASH | DCP_PKT_DECR_SEMA | DCP_PKT_INTERRUPT,
+      ctrl1: 0x00010000,
+      source: source2,
+      size: 9,
+      payload: payload2,
+    });
+    await dcpKickChannel0(machine, descriptor2, 1);
+    assert.equal(
+      await machine.readl(payload2),
+      0x882aa7cb,
+      'DCP CRC-32 of "123456789" must pad trailing bytes with zeros',
+    );
+  });
+}
+
+async function testDcpHashCheckContract() {
+  await withMachine(async (machine) => {
+    await dcpEnableChannel0(machine);
+
+    /* Matching CHECK_HASH payload completes without HASH_MISMATCH. */
+    const source = 0x00000700;
+    const payload = 0x00000780;
+    const descriptor = 0x00000100;
+    await machine.writel(source, 0x00636261);
+    for (const [i, word] of [0xa9993e36, 0x4706816a, 0xba3e2571, 0x7850c26c, 0x9cd0d89d].entries()) {
+      await machine.writel(payload + 4 * i, word);
+    }
+    await dcpWriteDescriptor(machine, descriptor, {
+      ctrl0: (0x48 << 24) | DCP_PKT_CHECK_HASH | DCP_PKT_HASH_INIT |
+        DCP_PKT_HASH_TERM | DCP_PKT_ENABLE_HASH |
+        DCP_PKT_DECR_SEMA | DCP_PKT_INTERRUPT,
+      source,
+      size: 3,
+      payload,
+    });
+    await dcpKickChannel0(machine, descriptor, 1);
+    assert.equal(
+      await machine.readl(descriptor + 0x1c),
+      0x48000001,
+      'DCP CHECK_HASH with a matching digest must complete normally',
+    );
+    assert.equal(
+      (await machine.readl(DCP_BASE + 0x120)) & 2,
+      0,
+      'DCP CHECK_HASH match must not raise HASH_MISMATCH',
+    );
+
+    /* Mismatched digest interrupts and terminates the chain. */
+    const descriptor2 = 0x00000140;
+    await machine.writel(payload, 0xa9993e37);
+    await machine.writel(DCP_BASE + 0x018, 1);
+    await machine.writel(DCP_BASE + 0x128, 0x00ff003e);
+    await dcpWriteDescriptor(machine, descriptor2, {
+      ctrl0: (0x59 << 24) | DCP_PKT_CHECK_HASH | DCP_PKT_HASH_INIT |
+        DCP_PKT_HASH_TERM | DCP_PKT_ENABLE_HASH | DCP_PKT_DECR_SEMA,
+      source,
+      size: 3,
+      payload,
+    });
+    await dcpKickChannel0(machine, descriptor2, 1);
+    assert.notEqual(
+      (await machine.readl(DCP_BASE + 0x120)) & 2,
+      0,
+      'DCP CHECK_HASH mismatch must raise CH0STAT.HASH_MISMATCH',
+    );
+    assert.notEqual(
+      (await machine.readl(DCP_BASE + 0x010)) & 1,
+      0,
+      'DCP CHECK_HASH mismatch must latch the channel interrupt status',
+    );
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x110),
+      0,
+      'DCP CHECK_HASH mismatch must terminate the channel chain',
+    );
+  });
+}
+
+async function testDcpMultiChannelContract() {
+  await withMachine(async (machine) => {
+    /* Enable channels 0-3, CH1 at high priority, IRQ enables for all. */
+    await machine.writel(DCP_BASE + 0x008, 0xc0000000);
+    await machine.writel(DCP_BASE + 0x024, 0x0000020f);
+    await machine.writel(DCP_BASE + 0x004, 0x0000000f);
+
+    /* CH1 high-priority AES-128 ECB packet and CH0 low-priority memcopy. */
+    const payload = 0x00000600;
+    const source = 0x00000700;
+    const destination = 0x00000800;
+    const descriptor = 0x00000100;
+    for (const [i, word] of [0x03020100, 0x07060504, 0x0b0a0908, 0x0f0e0d0c].entries()) {
+      await machine.writel(payload + 4 * i, word);
+    }
+    for (const [i, word] of [0x33221100, 0x77665544, 0xbbaa9988, 0xffeeddcc].entries()) {
+      await machine.writel(source + 4 * i, word);
+    }
+    await dcpWriteDescriptor(machine, descriptor, {
+      ctrl0: (0x31 << 24) | DCP_PKT_ALL_SWAPS | DCP_PKT_PAYLOAD_KEY |
+        DCP_PKT_CIPHER_ENCRYPT | DCP_PKT_ENABLE_CIPHER |
+        DCP_PKT_DECR_SEMA | DCP_PKT_INTERRUPT,
+      source,
+      destination,
+      size: 16,
+      payload,
+    });
+    const descriptor0 = 0x00000140;
+    await dcpWriteDescriptor(machine, descriptor0, {
+      ctrl0: (0x30 << 24) | 0x00000013,
+      source,
+      destination: destination + 0x100,
+      size: 16,
+    });
+    await machine.writel(DCP_BASE + 0x100, descriptor0);
+    await dcpKick(machine, 1, descriptor, 1);
+    await machine.writel(DCP_BASE + 0x110, 1);
+    assert.equal(
+      await machine.readl(destination),
+      0xd8e0c469,
+      'DCP CH1 must execute AES-128 ECB through the shared engine',
+    );
+    assert.equal(
+      await machine.readl(descriptor + 0x1c),
+      0x31000001,
+      'DCP CH1 descriptor must complete with its command tag',
+    );
+    assert.equal(
+      await machine.readl(destination + 0x100),
+      0x33221100,
+      'DCP CH0 must complete its memcopy after the high-priority channel',
+    );
+    assert.equal(
+      await machine.readl(descriptor0 + 0x1c),
+      0x30000001,
+      'DCP CH0 descriptor must complete through arbitration',
+    );
+    assert.equal(
+      (await machine.readl(DCP_BASE + 0x010)) & 3,
+      3,
+      'DCP STAT must latch interrupt status for both serviced channels',
+    );
+    assert.equal(
+      (await machine.readl(DCP_BASE + 0x010)) & 0x0fff0000,
+      0,
+      'DCP STAT READY/CUR_CHANNEL must be idle once arbitration drains',
+    );
+    await machine.writel(DCP_BASE + 0x018, 0x00000003);
+
+    /* CH2 memcopy and CH3 SHA-1 through their own register files. */
+    const descriptor2 = 0x00000180;
+    const descriptor3 = 0x000001c0;
+    const payload3 = 0x00000580;
+    await dcpWriteDescriptor(machine, descriptor2, {
+      ctrl0: (0x32 << 24) | 0x00000013,
+      source,
+      destination: destination + 0x200,
+      size: 8,
+    });
+    await dcpWriteDescriptor(machine, descriptor3, {
+      ctrl0: (0x33 << 24) | DCP_PKT_HASH_INIT | DCP_PKT_HASH_TERM |
+        DCP_PKT_ENABLE_HASH | DCP_PKT_DECR_SEMA | DCP_PKT_INTERRUPT,
+      source: source + 0x40,
+      size: 3,
+      payload: payload3,
+    });
+    await machine.writel(source + 0x40, 0x00636261);
+    await dcpKick(machine, 2, descriptor2, 1);
+    await dcpKick(machine, 3, descriptor3, 1);
+    assert.equal(
+      await machine.readl(destination + 0x200),
+      0x33221100,
+      'DCP CH2 must execute its memcopy descriptor',
+    );
+    assert.equal(
+      await machine.readl(payload3),
+      0xa9993e36,
+      'DCP CH3 must execute SHA-1 through the shared engine',
+    );
+    assert.equal(
+      (await machine.readl(DCP_BASE + 0x010)) & 0x0c,
+      0x0c,
+      'DCP STAT must latch interrupt status for CH2 and CH3',
+    );
+    assert.notEqual(
+      (await machine.readl(ICOLL_BASE + 0x050)) & (1 << 22),
+      0,
+      'DCP CH1-3 interrupts must assert the shared DCP IRQ on ICOLL source 54',
+    );
+  });
+}
+
+async function testDcpChannelErrorRecoveryContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(DCP_BASE + 0x008, 0xc0000000);
+    await machine.writel(DCP_BASE + 0x024, 0x00000006);
+    await machine.writel(DCP_BASE + 0x004, 0x00000006);
+
+    /* CH1 descriptor fetch from an unmapped address stalls the channel. */
+    await dcpKick(machine, 1, 0x50000000, 1);
+    assert.equal(
+      (await machine.readl(DCP_BASE + 0x160)) & 0x3e,
+      0x08,
+      'DCP CH1STAT must raise ERROR_PACKET on a bus faulting descriptor',
+    );
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x150),
+      0x00010000,
+      'DCP stalled channel must preserve its semaphore for recovery',
+    );
+    assert.equal(
+      (await machine.readl(DCP_BASE + 0x010)) & 2,
+      2,
+      'DCP STAT must latch the faulting channel interrupt status',
+    );
+
+    /* Software repairs the pointer, clears the error, and the channel runs. */
+    const source = 0x00000700;
+    const destination = 0x00000800;
+    const descriptor = 0x00000100;
+    await machine.writel(source, 0xcafebabe);
+    await machine.writel(source + 4, 0xdeadbeef);
+    await dcpWriteDescriptor(machine, descriptor, {
+      ctrl0: (0x41 << 24) | 0x00000013,
+      source,
+      destination,
+      size: 8,
+    });
+    await machine.writel(DCP_BASE + 0x140, descriptor);
+    await machine.writel(DCP_BASE + 0x168, 0x00ff003e);
+    assert.equal(
+      await machine.readl(destination),
+      0xcafebabe,
+      'DCP channel must resume its descriptor after software error recovery',
+    );
+    assert.equal(
+      await machine.readl(descriptor + 0x1c),
+      0x41000001,
+      'DCP recovered descriptor must complete with its command tag',
+    );
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x150),
+      0,
+      'DCP recovered channel must consume the preserved semaphore',
+    );
+
+    /* Semaphore nonzero without a chain bit raises the NO_CHAIN error. */
+    const descriptor2 = 0x00000140;
+    await dcpWriteDescriptor(machine, descriptor2, {
+      ctrl0: (0x42 << 24) | 0x00000013,
+      source,
+      destination: destination + 0x100,
+      size: 8,
+    });
+    await dcpKick(machine, 2, descriptor2, 2);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x1a0),
+      0x42020008,
+      'DCP must raise ERROR_PACKET/NO_CHAIN when the semaphore outlives the chain',
+    );
+  });
+}
+
+async function testDcpContextSwitchContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(DCP_BASE + 0x008, 0xc0000000);
+    await machine.writel(DCP_BASE + 0x024, 0x00000003);
+    await machine.writel(DCP_BASE + 0x004, 0x00000003);
+    await machine.writel(DCP_BASE + 0x004, 0x00200000);
+    await machine.writel(DCP_BASE + 0x050, 0x00000600);
+
+    /* CH0 starts a SHA-1 pass; its context must land in the context buffer. */
+    const source = 0x00000700;
+    const descriptor = 0x00000100;
+    for (let i = 0; i < 16; i++) {
+      await machine.writel(source + 4 * i, 0x61616161);
+    }
+    await dcpWriteDescriptor(machine, descriptor, {
+      ctrl0: (0x51 << 24) | DCP_PKT_HASH_INIT | DCP_PKT_ENABLE_HASH |
+        DCP_PKT_DECR_SEMA,
+      source,
+      size: 64,
+    });
+    await dcpKickChannel0(machine, descriptor, 1);
+    assert.deepEqual(
+      [
+        await machine.readl(0x688),
+        await machine.readl(0x68c),
+        await machine.readl(0x690),
+        await machine.readl(0x694),
+        await machine.readl(0x698),
+        await machine.readl(0x69c),
+      ],
+      [0xda4968eb, 0x2e377c1f, 0x884e8f52, 0x83524beb, 0xe74ebdbd, 512],
+      'DCP must save the CH0 SHA-1 context to the context buffer on completion',
+    );
+
+    /* CH1 memcopy switches the engine away from CH0. */
+    const descriptor1 = 0x00000140;
+    await dcpWriteDescriptor(machine, descriptor1, {
+      ctrl0: (0x52 << 24) | 0x00000013,
+      source,
+      destination: 0x00000800,
+      size: 8,
+    });
+    await dcpKick(machine, 1, descriptor1, 1);
+
+    /* CH0 resumes the hash; the context must be reloaded from the buffer. */
+    const payload = 0x00000580;
+    const descriptor2 = 0x00000180;
+    await machine.writel(source + 0x40, 0x00636261);
+    await dcpWriteDescriptor(machine, descriptor2, {
+      ctrl0: (0x53 << 24) | DCP_PKT_HASH_TERM | DCP_PKT_ENABLE_HASH |
+        DCP_PKT_DECR_SEMA | DCP_PKT_INTERRUPT,
+      source: source + 0x40,
+      size: 3,
+      payload,
+    });
+    await dcpKickChannel0(machine, descriptor2, 1);
+    assert.deepEqual(
+      [
+        await machine.readl(payload),
+        await machine.readl(payload + 4),
+        await machine.readl(payload + 8),
+        await machine.readl(payload + 12),
+        await machine.readl(payload + 16),
+      ],
+      [0xa5177e48, 0xd19a714d, 0x0463dbea, 0xfaab7f5c, 0x6d140ff3],
+      'DCP must continue the CH0 hash from the saved context after a channel switch',
+    );
+  });
+}
+
+async function testDcpCscContract() {
+  await withMachine(async (machine) => {
+    await machine.writel(DCP_BASE + 0x008, 0xc0000000);
+    await machine.writel(DCP_BASE + 0x004, 0x00000100);
+
+    /* 2x2 YUV420 frame, planar luma and chroma. */
+    const luma = 0x00001000;
+    const chromau = 0x00001010;
+    const chromav = 0x00001014;
+    const rgb = 0x00002000;
+    for (const [i, byte] of [255, 0, 128, 76].entries()) {
+      await machine.writeb(luma + i, byte);
+    }
+    await machine.writeb(chromau, 150);
+    await machine.writeb(chromav, 40);
+    await machine.writel(DCP_BASE + 0x320, (2 << 12) | 2);
+    await machine.writel(DCP_BASE + 0x330, 2);
+    await machine.writel(DCP_BASE + 0x340, rgb);
+    await machine.writel(DCP_BASE + 0x350, luma);
+    await machine.writel(DCP_BASE + 0x360, chromau);
+    await machine.writel(DCP_BASE + 0x370, chromav);
+    await machine.writel(DCP_BASE + 0x300, 0x00000201);
+    assert.deepEqual(
+      [
+        await machine.readl(rgb),
+        await machine.readl(rgb + 4),
+        await machine.readl(rgb + 8),
+        await machine.readl(rgb + 12),
+      ],
+      [0xffff8a00, 0x1a2c0000, 0xafc10000, 0x72850000],
+      'DCP CSC must convert the YUV420 frame to RGB24 with the reset coefficients',
+    );
+    assert.equal(
+      (await machine.readl(DCP_BASE + 0x310)) & 1,
+      1,
+      'DCP CSCSTAT must report completion',
+    );
+    assert.equal(
+      (await machine.readl(DCP_BASE + 0x300)) & 1,
+      1,
+      'DCP CSC ENABLE must remain latched for software after completion',
+    );
+    assert.equal(
+      (await machine.readl(DCP_BASE + 0x010)) & 0x100,
+      0x100,
+      'DCP STAT must latch the CSC interrupt',
+    );
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x350),
+      luma + 4,
+      'DCP CSC luma pointer must advance past the consumed input',
+    );
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x340),
+      rgb + 16,
+      'DCP CSC RGB pointer must advance past the written output',
+    );
+
+    /* Same frame converted to RGB16_565. */
+    const rgb565 = 0x00002100;
+    await machine.writel(DCP_BASE + 0x310, 0);
+    await machine.writel(DCP_BASE + 0x300, 0);
+    await machine.writel(DCP_BASE + 0x340, rgb565);
+    await machine.writel(DCP_BASE + 0x350, luma);
+    await machine.writel(DCP_BASE + 0x360, chromau);
+    await machine.writel(DCP_BASE + 0x370, chromav);
+    await machine.writel(DCP_BASE + 0x300, 0x00000001);
+    assert.deepEqual(
+      [await machine.readl(rgb565), await machine.readl(rgb565 + 4)],
+      [0x01638fff, 0x042e0615],
+      'DCP CSC must convert the same frame to RGB16_565',
     );
   });
 }
@@ -8482,6 +9195,15 @@ const tests = [
   ['DCP key and context register contract', testDcpKeyAndContextRegisterContract],
   ['DCP CSC register map contract', testDcpCscRegisterMapContract],
   ['DCP SCT alias contract', testDcpSctAliasContract],
+  ['DCP AES-128 ECB contract', testDcpAes128EcbContract],
+  ['DCP AES-128 CBC contract', testDcpAes128CbcContract],
+  ['DCP SHA-1 contract', testDcpSha1Contract],
+  ['DCP CRC-32 contract', testDcpCrc32Contract],
+  ['DCP hash check contract', testDcpHashCheckContract],
+  ['DCP multi-channel contract', testDcpMultiChannelContract],
+  ['DCP channel error recovery contract', testDcpChannelErrorRecoveryContract],
+  ['DCP context switch contract', testDcpContextSwitchContract],
+  ['DCP CSC contract', testDcpCscContract],
   ['LCDIF data access contract', testLcdifDataAccessContract],
   ['PINCTRL CTRL contract', testPinctrlCtrl],
   ['PINCTRL Bank 3 absence', testPinctrlBank3Absent],
