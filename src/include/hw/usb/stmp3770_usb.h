@@ -36,6 +36,7 @@ struct STMP3770USBState {
     uint32_t usbintr;
     uint32_t frindex;
     uint32_t device_addr;
+    uint32_t device_addr_staged;  /* USBADRA staged USBADR value */
     uint32_t endptlistaddr;
     uint32_t asynclistaddr;
     uint32_t ttctrl;

@@ -2945,15 +2945,27 @@ async function testUsbDeviceControlContract() {
     await machine.writel(USB_BASE + 0x148, 0xffffffff);
     assert.equal(
       await machine.readl(USB_BASE + 0x148),
-      0x030d05ff,
+      0x030d01ff,
       'USBCTRL USBINTR must retain only the Table 278 interrupt-enable fields',
     );
 
+    /*
+     * DEVICEADDR with all-ones sets USBADRA (bit 24), so USBADR is staged
+     * and the visible USBADR keeps its reset value of 0.  The read-back
+     * therefore shows only USBADRA set.
+     */
     await machine.writel(USB_BASE + 0x154, 0xffffffff);
     assert.equal(
       await machine.readl(USB_BASE + 0x154),
-      0xff000000,
-      'USBCTRL DEVICEADDR must retain only USBADR and USBADRA',
+      0x01000000,
+      'USBCTRL DEVICEADDR with USBADRA=1 must keep old USBADR and stage the new value',
+    );
+    /* Clear USBADRA by writing USBADR with USBADRA=0 (immediate update). */
+    await machine.writel(USB_BASE + 0x154, 0xfe000000);
+    assert.equal(
+      await machine.readl(USB_BASE + 0x154),
+      0xfe000000,
+      'USBCTRL DEVICEADDR with USBADRA=0 must update USBADR immediately',
     );
     await machine.writel(USB_BASE + 0x158, 0xffffffff);
     assert.equal(
@@ -3461,6 +3473,122 @@ async function testUsbFrindexAndStatusContract() {
     await machine.writel(USBMODE, 0x00000002);
     await machine.writel(FRINDEX, 0x00001234);
     assert.equal(await machine.readl(FRINDEX), 0x00000000);
+  });
+}
+
+async function testUsbAddrSchedAndIaaContract() {
+  await withMachine(async (machine) => {
+    const USBCMD = USB_BASE + 0x140;
+    const USBSTS = USB_BASE + 0x144;
+    const USBMODE = USB_BASE + 0x1a8;
+    const DEVICEADDR = USB_BASE + 0x154;
+    const ENDPTLISTADDR = USB_BASE + 0x158;
+
+    /* Reset controller into device mode. */
+    await machine.writel(USBCMD, 0x00000002);
+    assert.equal(await machine.readl(USBCMD), 0x00080000);
+
+    /*
+     * DEVICEADDR in device mode:
+     *   USBADRA=0 -> USBADR updates immediately, USBADRA reads back 0.
+     */
+    await machine.writel(DEVICEADDR, 0x12000000);
+    assert.equal(
+      await machine.readl(DEVICEADDR),
+      0x12000000,
+      'USBCTRL DEVICEADDR with USBADRA=0 must update USBADR immediately',
+    );
+
+    /*
+     * USBADRA=1 -> USBADR is staged, USBADRA reads back 1, visible USBADR
+     * keeps the old value (here 0x12).
+     */
+    await machine.writel(DEVICEADDR, 0x23000000 | (1 << 24));
+    assert.equal(
+      (await machine.readl(DEVICEADDR)) & (1 << 24),
+      1 << 24,
+      'USBCTRL DEVICEADDR.USBADRA must read back 1 while staged',
+    );
+    assert.equal(
+      (await machine.readl(DEVICEADDR)) & 0xfe000000,
+      0x12000000,
+      'USBCTRL DEVICEADDR.USBADR must keep the old value while staged',
+    );
+
+    /* Controller reset clears USBADRA and the staged address. */
+    await machine.writel(USBCMD, 0x00000002);
+    assert.equal(await machine.readl(USBCMD), 0x00080000);
+    assert.equal(
+      await machine.readl(DEVICEADDR),
+      0,
+      'USBCTRL controller reset must clear DEVICEADDR and USBADRA',
+    );
+
+    /*
+     * ENDPTLISTADDR in device mode: EPBASE[31:11], bits 10:0 RO.
+     */
+    await machine.writel(ENDPTLISTADDR, 0xffffffff);
+    assert.equal(
+      await machine.readl(ENDPTLISTADDR),
+      0xfffff800,
+      'USBCTRL ENDPTLISTADDR in device mode must keep EPBASE[31:11]',
+    );
+
+    /*
+     * Switch to host mode: offset 0x154 becomes PERIODICLISTBASE
+     * (PERBASE[31:12]) and 0x158 becomes ASYNCLISTADDR (ASYBASE[31:5]).
+     */
+    await machine.writel(USBMODE, 0x00000003);
+    assert.equal(await machine.readl(USBMODE), 0x00000003);
+
+    await machine.writel(DEVICEADDR, 0xffffffff);
+    assert.equal(
+      await machine.readl(DEVICEADDR),
+      0xfffff000,
+      'USBCTRL PERIODICLISTBASE in host mode must keep PERBASE[31:12]',
+    );
+
+    await machine.writel(ENDPTLISTADDR, 0xffffffff);
+    assert.equal(
+      await machine.readl(ENDPTLISTADDR),
+      0xffffffe0,
+      'USBCTRL ASYNCLISTADDR in host mode must keep ASYBASE[31:5]',
+    );
+
+    /*
+     * USBCMD.IAA doorbell: writing 1 self-clears USBCMD.IAA and sets
+     * USBSTS.AAI (bit 5) in host mode.
+     */
+    await machine.writel(USBSTS, 0xffffffff & 0x030c01ff);
+    assert.equal(await machine.readl(USBSTS) & 0x20, 0);
+    await machine.writel(USBCMD, 0x00080040);
+    assert.equal(
+      await machine.readl(USBCMD) & 0x40,
+      0,
+      'USBCTRL USBCMD.IAA must self-clear after doorbell write',
+    );
+    assert.equal(
+      await machine.readl(USBSTS) & 0x20,
+      0x20,
+      'USBCTRL USBSTS.AAI must be set after IAA doorbell in host mode',
+    );
+
+    /* AAI is W1C. */
+    await machine.writel(USBSTS, 0x00000020);
+    assert.equal(await machine.readl(USBSTS) & 0x20, 0);
+
+    /*
+     * IAA doorbell in device mode must not set AAI (host-only status).
+     */
+    await machine.writel(USBCMD, 0x00000002);
+    await machine.writel(USBMODE, 0x00000002);
+    await machine.writel(USBSTS, 0xffffffff & 0x030c01ff);
+    await machine.writel(USBCMD, 0x00080040);
+    assert.equal(
+      await machine.readl(USBSTS) & 0x20,
+      0,
+      'USBCTRL USBSTS.AAI must remain clear in device mode',
+    );
   });
 }
 
@@ -8314,6 +8442,7 @@ const tests = [
   ['USBCTRL endpoint register contract', testUsbEndpointRegisterContract],
   ['USBCTRL GPTIMER contract', testUsbGptimerContract],
   ['USBCTRL FRINDEX and host status contract', testUsbFrindexAndStatusContract],
+  ['USBCTRL addr/sched and IAA contract', testUsbAddrSchedAndIaaContract],
   ['SSP register layout and reset contract', testSspRegisterLayoutAndResetContract],
   ['SSP soft reset and clock gate contract', testSspSoftResetAndClockGateContract],
   ['SSP soft reset hold contract', testSspSoftResetHoldContract],

@@ -72,8 +72,23 @@
 #define USBCMD_IAA          (1U << 6)
 #define USBCMD_WRITABLE_MASK        0x00FFEB7FU
 
-#define USBSTS_W1C_MASK             0x030D05FF
-#define USBINTR_WRITABLE_MASK        0x030D05FF
+/*
+ * USBSTS W1C bits per Table 276:
+ *   bits 0-8: UI/UEI/PCI/FRI/SEI/AAI/URI/SRI/SLI
+ *   bit 10 (ULPII) is RW but "not present in this implementation" -> treat as RO 0
+ *   bit 16 (NAKI) is RO (set/cleared by hardware from ENDPTNAK/ENDPTNAKEN state)
+ *   bits 18-19: UAI/UPI
+ *   bits 24-25: TI0/TI1
+ */
+#define USBSTS_W1C_MASK             0x030C01FF
+/*
+ * USBINTR writable bits per Table 278:
+ *   Same layout as USBSTS W1C, plus bit 16 (NAKE) which enables the RO NAKI
+ *   status.  Bit 10 (ULPIE) is "not used" and kept RO 0.
+ */
+#define USBINTR_WRITABLE_MASK        0x030D01FF
+#define USBINTR_NAKE_BIT             (1U << 16)
+#define USBSTS_AAI                  (1U << 5)
 #define USBSTS_URI                  (1U << 6)
 #define USBSTS_SRI                  (1U << 7)
 #define USBSTS_FRI                  (1U << 3)
@@ -102,8 +117,21 @@
 #define USBCTRL_BURSTSIZE_RESET         0x00001010
 #define USBCTRL_OTGSC_DEVICE_RESET      0x00000020
 #define USBCTRL_USBINTR_WRITABLE_MASK   USBINTR_WRITABLE_MASK
+/*
+ * DEVICEADDR (device mode) / PERIODICLISTBASE (host mode) share offset 0x154.
+ * Device: USBADR[31:25] + USBADRA[24], bits 23:0 RO.
+ * Host:   PERBASE[31:12], bits 11:0 RO.
+ */
 #define USBCTRL_DEVICEADDR_WRITABLE_MASK 0xFF000000
+#define USBCTRL_PERIODICLISTBASE_WRITABLE_MASK 0xFFFFF000
+#define DEVICEADDR_USBADRA            (1U << 24)
+/*
+ * ENDPTLISTADDR (device mode) / ASYNCLISTADDR (host mode) share offset 0x158.
+ * Device: EPBASE[31:11], bits 10:0 RO.
+ * Host:   ASYBASE[31:5], bits 4:0 RO.
+ */
 #define USBCTRL_ENDPTLISTADDR_WRITABLE_MASK 0xFFFFF800
+#define USBCTRL_ASYNCLISTADDR_WRITABLE_MASK 0xFFFFFFE0
 #define USBCTRL_TTCTRL_WRITABLE_MASK    0x7F000000
 #define USBCTRL_BURSTSIZE_WRITABLE_MASK 0x0000FFFF
 #define USBCTRL_TXFILLTUNING_WRITABLE_MASK 0x003F007F
@@ -290,6 +318,7 @@ static void usb_controller_reset(STMP3770USBState *s)
     s->usbintr = 0;
     s->frindex = 0;
     s->device_addr = 0;
+    s->device_addr_staged = 0;
     s->endptlistaddr = 0;
     s->asynclistaddr = 0;
     s->ttctrl = 0;
@@ -502,6 +531,18 @@ static void usb_write(void *opaque, hwaddr offset,
         if (s->usbcmd & USBCMD_RST) {
             usb_controller_reset(s);
         }
+        /*
+         * IAA doorbell (host only): software writes 1 to USBCMD.IAA to
+         * request an interrupt on the next async schedule advance.  Since
+         * the async schedule is not modelled, immediately set USBSTS.AAI
+         * and self-clear USBCMD.IAA.
+         */
+        if (s->usbcmd & USBCMD_IAA) {
+            s->usbcmd &= ~USBCMD_IAA;
+            if (usb_host_mode(s)) {
+                s->usbsts |= USBSTS_AAI;
+            }
+        }
         usb_update_frindex_timer(s);
         usb_update_irq(s);
         break;
@@ -520,11 +561,40 @@ static void usb_write(void *opaque, hwaddr offset,
         }
         break;
     case REG_DEVICEADDR:
-        s->device_addr = (uint32_t)value & USBCTRL_DEVICEADDR_WRITABLE_MASK;
+        if (usb_host_mode(s)) {
+            /* Host mode: PERIODICLISTBASE - bits 31:12 writable */
+            s->device_addr = (uint32_t)value &
+                             USBCTRL_PERIODICLISTBASE_WRITABLE_MASK;
+        } else {
+            /*
+             * Device mode: DEVICEADDR - USBADR[31:25] + USBADRA[24].
+             * USBADRA staged-address mechanism:
+             *   USBADRA=0: USBADR updates immediately.
+             *   USBADRA=1: USBADR staged in hidden register, loaded on
+             *              next IN ACK on EP0; cleared on OUT/SETUP or reset.
+             */
+            uint32_t val = (uint32_t)value & USBCTRL_DEVICEADDR_WRITABLE_MASK;
+            if (val & DEVICEADDR_USBADRA) {
+                /* Stage the new USBADR, keep old device_addr visible */
+                s->device_addr_staged = val & ~DEVICEADDR_USBADRA;
+                s->device_addr = (s->device_addr & ~DEVICEADDR_USBADRA) |
+                                 DEVICEADDR_USBADRA;
+            } else {
+                s->device_addr_staged = 0;
+                s->device_addr = val;
+            }
+        }
         break;
     case REG_ENDPTLISTADDR:
-        s->endptlistaddr = (uint32_t)value &
-                           USBCTRL_ENDPTLISTADDR_WRITABLE_MASK;
+        if (usb_host_mode(s)) {
+            /* Host mode: ASYNCLISTADDR - bits 31:5 writable */
+            s->endptlistaddr = (uint32_t)value &
+                               USBCTRL_ASYNCLISTADDR_WRITABLE_MASK;
+        } else {
+            /* Device mode: ENDPTLISTADDR - bits 31:11 writable */
+            s->endptlistaddr = (uint32_t)value &
+                               USBCTRL_ENDPTLISTADDR_WRITABLE_MASK;
+        }
         break;
     case REG_TTCTRL:
         s->ttctrl = (uint32_t)value & USBCTRL_TTCTRL_WRITABLE_MASK;
@@ -716,14 +786,15 @@ static void usb_finalize(Object *obj)
 
 static const VMStateDescription vmstate_usb = {
     .name = "stmp3770-usb",
-    .version_id = 6,
-    .minimum_version_id = 6,
+    .version_id = 7,
+    .minimum_version_id = 7,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(usbcmd, STMP3770USBState),
         VMSTATE_UINT32(usbsts, STMP3770USBState),
         VMSTATE_UINT32(usbintr, STMP3770USBState),
         VMSTATE_UINT32(frindex, STMP3770USBState),
         VMSTATE_UINT32(device_addr, STMP3770USBState),
+        VMSTATE_UINT32_V(device_addr_staged, STMP3770USBState, 7),
         VMSTATE_UINT32(endptlistaddr, STMP3770USBState),
         VMSTATE_UINT32(asynclistaddr, STMP3770USBState),
         VMSTATE_UINT32_V(ttctrl, STMP3770USBState, 2),
