@@ -23,12 +23,14 @@
 #include "hw/arm/stmp3770_uartdbg.h"
 #include "hw/arm/stmp3770_uartapp.h"
 #include "hw/audio/stmp3770_audio.h"
+#include "hw/audio/stmp3770_spdif.h"
 #include "hw/display/stmp3770_lcdif.h"
 #include "hw/gpio/stmp3770_pinctrl.h"
 #include "hw/intc/stmp3770_icoll.h"
 #include "hw/misc/stmp3770_clkctrl.h"
 #include "hw/misc/stmp3770_dcp.h"
 #include "hw/misc/stmp3770_digctl.h"
+#include "hw/misc/stmp3770_dri.h"
 #include "hw/misc/stmp3770_lradc.h"
 #include "hw/misc/stmp3770_power.h"
 #include "hw/misc/stmp3770_ocotp.h"
@@ -109,6 +111,12 @@ struct STMP3770State {
     /* Audio DAC/ADC controllers */
     STMP3770AudioDACState *audio_dac;
     STMP3770AudioADCState *audio_adc;
+
+    /* SPDIF transmitter */
+    STMP3770SPDIFState *spdif;
+
+    /* Digital Radio Interface */
+    STMP3770DRIState *dri;
 
     /* SSP controllers */
     STMP3770SSPState *ssp[STMP3770_NUM_SSPS];
@@ -206,6 +214,10 @@ struct STMP3770State {
 #define STMP3770_AUDIOADC_ADDR      0x8004C000
 #define STMP3770_AUDIOADC_SIZE      0x2000
 
+/* SPDIF Transmitter */
+#define STMP3770_SPDIF_ADDR         0x80054000
+#define STMP3770_SPDIF_SIZE         0x2000
+
 /* LRADC (Low-Resolution ADC) */
 #define STMP3770_LRADC_ADDR         0x80050000
 #define STMP3770_LRADC_SIZE         0x2000
@@ -229,6 +241,10 @@ struct STMP3770State {
 /* Debug UART */
 #define STMP3770_DBGUART_ADDR       0x80070000
 #define STMP3770_DBGUART_SIZE       0x2000
+
+/* Digital Radio Interface (DRI) */
+#define STMP3770_DRI_ADDR           0x80074000
+#define STMP3770_DRI_SIZE           0x2000
 
 /* App UART */
 #define STMP3770_APPUART_ADDR       0x8006C000

@@ -1,0 +1,8 @@
+diff --git a/hw/audio/meson.build b/hw/audio/meson.build
+index 1111111..2222222 100644
+--- a/hw/audio/meson.build
++++ b/hw/audio/meson.build
+@@ -18,3 +18,4 @@ system_ss.add(when: ['CONFIG_VIRTIO_SND', 'CONFIG_VIRTIO', 'CONFIG_VIRTIO_PCI'],
+ system_ss.add(when: 'CONFIG_STMP3770_AUDIO_DAC', if_true: files('stmp3770_audio.c'))
+ system_ss.add(when: 'CONFIG_STMP3770_AUDIO_ADC', if_true: files('stmp3770_audio.c'))
++system_ss.add(when: 'CONFIG_STMP3770_SPDIF', if_true: files('stmp3770_spdif.c'))

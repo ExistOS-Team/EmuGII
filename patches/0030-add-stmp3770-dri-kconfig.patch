@@ -1,0 +1,22 @@
+diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
+index a111111..b222222 100644
+--- a/hw/arm/Kconfig
++++ b/hw/arm/Kconfig
+@@ -550,4 +550,5 @@ config STMP3770
+     select STMP3770_RTC
+     select STMP3770_POWER
+     select STMP3770_DCP
++    select STMP3770_DRI
+     select STMP3770_LRADC
+
+diff --git a/hw/misc/Kconfig b/hw/misc/Kconfig
+index a111111..b222222 100644
+--- a/hw/misc/Kconfig
++++ b/hw/misc/Kconfig
+@@ -6,2 +6,6 @@ config STMP3770_BCH
+ config STMP3770_DCP
+     bool
++
++config STMP3770_DRI
++    bool
++

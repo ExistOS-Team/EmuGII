@@ -1,0 +1,8 @@
+diff --git a/hw/misc/meson.build b/hw/misc/meson.build
+index 1111111..2222222 100644
+--- a/hw/misc/meson.build
++++ b/hw/misc/meson.build
+@@ -79,3 +79,4 @@ system_ss.add(when: 'CONFIG_STMP3770', if_true: files(
+ system_ss.add(when: 'CONFIG_STMP3770_OCOTP', if_true: files('stmp3770_ocotp.c'))
+ system_ss.add(when: 'CONFIG_STMP3770_DCP', if_true: files('stmp3770_dcp.c'))
++system_ss.add(when: 'CONFIG_STMP3770_DRI', if_true: files('stmp3770_dri.c'))

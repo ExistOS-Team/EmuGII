@@ -1,0 +1,24 @@
+diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
+index a111111..b222222 100644
+--- a/hw/arm/Kconfig
++++ b/hw/arm/Kconfig
+@@ -542,6 +542,7 @@ config STMP3770
+     select STMP3770_AUDIO_DAC
+     select STMP3770_AUDIO_ADC
+     select STMP3770_TIMER
++    select STMP3770_SPDIF
+     select STMP3770_USBPHY
+     select STMP3770_USB
+     select STMP3770_PWM
+
+diff --git a/hw/audio/Kconfig b/hw/audio/Kconfig
+index a111111..b222222 100644
+--- a/hw/audio/Kconfig
++++ b/hw/audio/Kconfig
+@@ -62,2 +62,6 @@
+ config STMP3770_AUDIO_ADC
+     bool
++
++config STMP3770_SPDIF
++    bool
++

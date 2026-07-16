@@ -19,6 +19,10 @@ const DIGCTL_BASE = 0x8001c000;
 const PINCTRL_BASE = 0x80018000;
 const DFLPT_BASE = 0x800c0000;
 const DCP_BASE = 0x80028000;
+const SPDIF_BASE = 0x80054000;
+const DRI_BASE = 0x80074000;
+const AUDIODAC_BASE = 0x80048000;
+const AUDIOADC_BASE = 0x8004c000;
 const LCDIF_BASE = 0x80030000;
 const OCOTP_BASE = 0x8002c000;
 const POWER_BASE = 0x80044000;
@@ -7340,6 +7344,687 @@ async function testDcpCscContract() {
   });
 }
 
+async function testSpdifRegisterContract() {
+  await withMachine(async (machine) => {
+    assert.equal(
+      await machine.readl(SPDIF_BASE + 0x000),
+      0xc0000020,
+      'SPDIF CTRL must reset with SFTRST, CLKGATE and WAIT_END_XFER',
+    );
+    assert.equal(
+      await machine.readl(SPDIF_BASE + 0x010),
+      0x80000000,
+      'SPDIF STAT must report PRESENT with END_XFER clear',
+    );
+    assert.equal(
+      await machine.readl(SPDIF_BASE + 0x020),
+      0x00020000,
+      'SPDIF FRAMECTRL must reset with V_CONFIG set',
+    );
+    assert.equal(
+      await machine.readl(SPDIF_BASE + 0x030),
+      0x10000000,
+      'SPDIF SRR must reset to single-rate with a zeroed RATE',
+    );
+    assert.equal(
+      await machine.readl(SPDIF_BASE + 0x040),
+      0x00000001,
+      'SPDIF DEBUG must report empty FIFO space after reset',
+    );
+    assert.equal(
+      await machine.readl(SPDIF_BASE + 0x060),
+      0x01010000,
+      'SPDIF VERSION must report block v1.1',
+    );
+    assert.equal(
+      await machine.readl(SPDIF_BASE + 0x004),
+      0,
+      'SPDIF CTRL_SET must read as zero (SCT alias contract)',
+    );
+
+    await machine.writel(SPDIF_BASE + 0x000, 0x3fffffff);
+    assert.equal(
+      await machine.readl(SPDIF_BASE + 0x000),
+      0x001f0033,
+      'SPDIF CTRL must mask reserved bits and preserve W1C status bits on base writes',
+    );
+    await machine.writel(SPDIF_BASE + 0x004, 0x0000000c);
+    assert.equal(
+      (await machine.readl(SPDIF_BASE + 0x000)) & 0xc,
+      0xc,
+      'SPDIF CTRL_SET must raise the FIFO error status bits',
+    );
+    await machine.writel(SPDIF_BASE + 0x000, 0);
+    assert.equal(
+      (await machine.readl(SPDIF_BASE + 0x000)) & 0xc,
+      0xc,
+      'SPDIF FIFO error status bits must survive general writes (W1C only)',
+    );
+    await machine.writel(SPDIF_BASE + 0x008, 0x0000000c);
+    assert.equal(
+      (await machine.readl(SPDIF_BASE + 0x000)) & 0xc,
+      0,
+      'SPDIF CTRL_CLR must clear the FIFO error status bits',
+    );
+
+    await machine.writel(SPDIF_BASE + 0x020, 0xffffffff);
+    assert.equal(
+      await machine.readl(SPDIF_BASE + 0x020),
+      0x000377ff,
+      'SPDIF FRAMECTRL must retain only documented subcode bits',
+    );
+    await machine.writel(SPDIF_BASE + 0x030, 0xffffffff);
+    assert.equal(
+      await machine.readl(SPDIF_BASE + 0x030),
+      0x700fffff,
+      'SPDIF SRR must retain only BASEMULT and RATE fields',
+    );
+    await machine.writel(SPDIF_BASE + 0x010, 0);
+    assert.equal(
+      await machine.readl(SPDIF_BASE + 0x010),
+      0x80000000,
+      'SPDIF STAT must ignore writes (read-only)',
+    );
+
+    await machine.writel(SPDIF_BASE + 0x004, 0x80000000);
+    assert.equal(
+      await machine.readl(SPDIF_BASE + 0x000),
+      0xc0000020,
+      'SPDIF SFTRST must restore the documented reset contract',
+    );
+    assert.equal(
+      await machine.readl(SPDIF_BASE + 0x020),
+      0x00020000,
+      'SPDIF SFTRST must reset FRAMECTRL',
+    );
+  });
+}
+
+async function testSpdifFifoAndDmaContract() {
+  await withMachine(async (machine) => {
+    const descriptor = 0x00000500;
+    const buffer = 0x00001000;
+    const channel2Nxtcmdar = APBX_BASE + 0x130;
+    const channel2Sema = APBX_BASE + 0x160;
+
+    await machine.writel(SPDIF_BASE + 0x008, 0xc0000000);
+    await machine.writel(SPDIF_BASE + 0x030, 0x1000bb80);
+    await machine.writel(SPDIF_BASE + 0x004, 0x00000002);
+
+    /* APBX channel 2: PIO CTRL (RUN + IRQ enable) then 8 bytes to DATA. */
+    const cmd =
+      (8 << 16) |  /* XFER_COUNT */
+      (1 << 12) |  /* CMDWORDS */
+      (1 << 6) |   /* SEMAPHORE */
+      (1 << 3) |   /* IRQONCMPLT */
+      2;           /* DMA_READ (MXS convention: memory -> peripheral) */
+    await machine.writel(APBX_BASE + 0x008, 0xc0000000);
+    await machine.writel(APBX_BASE + 0x014, 1 << 10);
+    await machine.writel(buffer + 0x00, 0x11111111);
+    await machine.writel(buffer + 0x04, 0x22222222);
+    await machine.writel(descriptor + 0x00, 0);
+    await machine.writel(descriptor + 0x04, cmd);
+    await machine.writel(descriptor + 0x08, buffer);
+    await machine.writel(descriptor + 0x0c, 0x00000003);
+    await machine.writel(channel2Nxtcmdar, descriptor);
+    await machine.writel(channel2Sema, 1);
+    assert.notEqual(
+      (await machine.readl(ICOLL_BASE + 0x040)) & (1 << 9),
+      0,
+      'APBX channel 2 completion must assert the SPDIF DMA source on ICOLL',
+    );
+    assert.equal(
+      await machine.readl(SPDIF_BASE + 0x040),
+      0x00000001,
+      'SPDIF DEBUG must still report FIFO space below the 32-bit capacity',
+    );
+
+    /* Fill the 4-word FIFO: conversion starts and the stream drains. */
+    await machine.writel(SPDIF_BASE + 0x050, 0x33333333);
+    await machine.writel(SPDIF_BASE + 0x050, 0x44444444);
+    assert.equal(
+      (await machine.readl(SPDIF_BASE + 0x040)) & 1,
+      0,
+      'SPDIF DEBUG must report a full FIFO in 32-bit mode',
+    );
+    await machine.clockStep(100000);
+    assert.notEqual(
+      (await machine.readl(SPDIF_BASE + 0x000)) & 8,
+      0,
+      'SPDIF must raise FIFO_UNDERFLOW_IRQ after the stream starves',
+    );
+    assert.notEqual(
+      (await machine.readl(ICOLL_BASE + 0x040)) & (1 << 10),
+      0,
+      'SPDIF FIFO error must assert ICOLL source 10',
+    );
+    assert.equal(
+      (await machine.readl(SPDIF_BASE + 0x040)) & 1,
+      1,
+      'SPDIF DEBUG must report FIFO space again after the drain',
+    );
+
+    /* END_XFER latches once RUN drops with an empty stream. */
+    await machine.writel(SPDIF_BASE + 0x008, 0x00000001);
+    assert.equal(
+      await machine.readl(SPDIF_BASE + 0x010),
+      0x80000001,
+      'SPDIF STAT must report END_XFER after the transfer completes',
+    );
+
+    /* Pushing past the full FIFO raises FIFO_OVERFLOW_IRQ. */
+    await machine.writel(SPDIF_BASE + 0x050, 0x55555555);
+    await machine.writel(SPDIF_BASE + 0x050, 0x66666666);
+    await machine.writel(SPDIF_BASE + 0x050, 0x77777777);
+    await machine.writel(SPDIF_BASE + 0x050, 0x88888888);
+    await machine.writel(SPDIF_BASE + 0x050, 0x99999999);
+    assert.notEqual(
+      (await machine.readl(SPDIF_BASE + 0x000)) & 4,
+      0,
+      'SPDIF must raise FIFO_OVERFLOW_IRQ when the FIFO is overfilled',
+    );
+  });
+}
+
+async function testDriRegisterContract() {
+  await withMachine(async (machine) => {
+    assert.equal(
+      await machine.readl(DRI_BASE + 0x000),
+      0xc0010000,
+      'DRI CTRL must reset with SFTRST, CLKGATE and the spare delay field',
+    );
+    assert.equal(
+      await machine.readl(DRI_BASE + 0x010),
+      0x00080010,
+      'DRI TIMING must reset to the documented pilot rate and gap interval',
+    );
+    assert.equal(
+      await machine.readl(DRI_BASE + 0x020),
+      0x80000000,
+      'DRI STAT must report DRI_PRESENT with idle summaries',
+    );
+    assert.equal(
+      await machine.readl(DRI_BASE + 0x030),
+      0,
+      'DRI DATA must read empty without an external radio front-end',
+    );
+    assert.equal(
+      await machine.readl(DRI_BASE + 0x004),
+      0,
+      'DRI CTRL_SET must read as zero (SCT alias contract)',
+    );
+
+    await machine.writel(DRI_BASE + 0x000, 0x3fffffff);
+    assert.equal(
+      await machine.readl(DRI_BASE + 0x000),
+      0x261f8e01,
+      'DRI CTRL must mask reserved bits and preserve W1C status bits',
+    );
+    await machine.writel(DRI_BASE + 0x010, 0xffffffff);
+    assert.equal(
+      await machine.readl(DRI_BASE + 0x010),
+      0x000f00ff,
+      'DRI TIMING must retain only documented timing fields',
+    );
+    await machine.writel(DRI_BASE + 0x040, 0xffffffff);
+    assert.equal(
+      await machine.readl(DRI_BASE + 0x040),
+      0x0ffc0000,
+      'DRI DEBUG0 must keep read-only line state at zero',
+    );
+    await machine.writel(DRI_BASE + 0x050, 0xffffffff);
+    assert.equal(
+      await machine.readl(DRI_BASE + 0x050),
+      0xf8000000,
+      'DRI DEBUG1 must retain only the invert/reverse controls',
+    );
+
+    await machine.writel(DRI_BASE + 0x004, 0x80000000);
+    assert.equal(
+      await machine.readl(DRI_BASE + 0x000),
+      0xc0010000,
+      'DRI SFTRST must restore the documented reset contract',
+    );
+  });
+}
+
+async function testDriIrqAndDmaContract() {
+  await withMachine(async (machine) => {
+    const descriptor = 0x00000500;
+    const channel5Nxtcmdar = APBX_BASE + 0x280;
+    const channel5Sema = APBX_BASE + 0x2b0;
+
+    await machine.writel(DRI_BASE + 0x008, 0xc0000000);
+
+    /* Software-set status plus enable must drive STAT summaries and IRQ. */
+    await machine.writel(DRI_BASE + 0x004, 0x00000e06);
+    assert.equal(
+      (await machine.readl(DRI_BASE + 0x020)) & 6,
+      6,
+      'DRI STAT summaries must AND the status and enable fields',
+    );
+    assert.notEqual(
+      (await machine.readl(ICOLL_BASE + 0x050)) & (1 << 18),
+      0,
+      'DRI enabled error status must assert ICOLL source 50',
+    );
+    await machine.writel(DRI_BASE + 0x008, 0x00000006);
+    assert.equal(
+      (await machine.readl(DRI_BASE + 0x020)) & 6,
+      0,
+      'DRI CTRL_CLR must clear the W1C status and drop the summaries',
+    );
+    assert.equal(
+      (await machine.readl(ICOLL_BASE + 0x050)) & (1 << 18),
+      0,
+      'DRI ICOLL source 50 must deassert after the status clears',
+    );
+
+    /* APBX channel 5 PIO-only descriptor completes on the DRI DMA source. */
+    await machine.writel(APBX_BASE + 0x008, 0xc0000000);
+    await machine.writel(APBX_BASE + 0x014, 1 << 13);
+    await machine.writel(descriptor + 0x00, 0);
+    await machine.writel(descriptor + 0x04, (1 << 12) | (1 << 6) | (1 << 3));
+    await machine.writel(descriptor + 0x08, 0);
+    await machine.writel(descriptor + 0x0c, 0x00000001);
+    await machine.writel(channel5Nxtcmdar, descriptor);
+    await machine.writel(channel5Sema, 1);
+    assert.notEqual(
+      (await machine.readl(ICOLL_BASE + 0x050)) & (1 << 17),
+      0,
+      'APBX channel 5 completion must assert the DRI DMA source on ICOLL',
+    );
+    assert.equal(
+      (await machine.readl(DRI_BASE + 0x000)) & 1,
+      1,
+      'DRI CTRL PIO write from the DMA must set RUN',
+    );
+  });
+}
+
+async function testAudiooutRegisterContract() {
+  await withMachine(async (machine) => {
+    const resets = [
+      [0x000, 0xc0000000, 'CTRL'],
+      [0x010, 0x80000000, 'STAT'],
+      [0x020, 0x10110037, 'DACSRR'],
+      [0x030, 0x01fe01fe, 'DACVOLUME'],
+      [0x040, 0x00000001, 'DACDEBUG'],
+      [0x050, 0x01000c0c, 'HPVOL'],
+      [0x060, 0x00000000, 'RESERVED'],
+      [0x070, 0x01001111, 'PWRDN'],
+      [0x080, 0x00000000, 'REFCTRL'],
+      [0x090, 0x00000000, 'ANACTRL'],
+      [0x0a0, 0x00000000, 'TEST'],
+      [0x0b0, 0x00000000, 'BISTCTRL'],
+      [0x0e0, 0x80000000, 'ANACLKCTRL'],
+      [0x100, 0x01404808, 'LINEOUTCTRL'],
+      [0x200, 0x01010000, 'VERSION'],
+    ];
+    for (const [offset, value, name] of resets) {
+      assert.equal(
+        await machine.readl(AUDIODAC_BASE + offset),
+        value,
+        `AUDIOOUT ${name} must have its documented reset value`,
+      );
+    }
+    assert.equal(
+      await machine.readl(AUDIODAC_BASE + 0x004),
+      0,
+      'AUDIOOUT CTRL_SET must read as zero (SCT alias contract)',
+    );
+    assert.equal(
+      await machine.readl(AUDIODAC_BASE + 0x204),
+      0,
+      'AUDIOOUT VERSION must not respond on an undeclared alias',
+    );
+
+    const masks = [
+      [0x000, 0x3fffffff, 0x001f7733, 'CTRL'],
+      [0x020, 0xffffffff, 0xf71f1fff, 'DACSRR'],
+      [0x030, 0xffffffff, 0x03ff01ff, 'DACVOLUME'],
+      [0x040, 0xffffffff, 0x80000f01, 'DACDEBUG'],
+      [0x050, 0xffffffff, 0x03017f7f, 'HPVOL'],
+      [0x070, 0xffffffff, 0x01111111, 'PWRDN'],
+      [0x080, 0xffffffff, 0x07ff7ff7, 'REFCTRL'],
+      [0x090, 0xffffffff, 0x11367730, 'ANACTRL'],
+      [0x0a0, 0xffffffff, 0x77f03007, 'TEST'],
+      [0x0e0, 0xffffffff, 0x80000017, 'ANACLKCTRL'],
+      [0x100, 0xffffffff, 0x03ffff1f, 'LINEOUTCTRL'],
+    ];
+    for (const [offset, input, value, name] of masks) {
+      await machine.writel(AUDIODAC_BASE + offset, input);
+      assert.equal(
+        await machine.readl(AUDIODAC_BASE + offset),
+        value,
+        `AUDIOOUT ${name} must mask reserved bits read-only`,
+      );
+    }
+    await machine.writel(AUDIODAC_BASE + 0x010, 0);
+    assert.equal(
+      await machine.readl(AUDIODAC_BASE + 0x010),
+      0x80000000,
+      'AUDIOOUT STAT must ignore writes (read-only)',
+    );
+    await machine.writel(AUDIODAC_BASE + 0x060, 0xffffffff);
+    assert.equal(
+      await machine.readl(AUDIODAC_BASE + 0x060),
+      0,
+      'AUDIOOUT RESERVED must read as zero',
+    );
+    await machine.writel(AUDIODAC_BASE + 0x0b0, 0xffffffff);
+    assert.equal(
+      await machine.readl(AUDIODAC_BASE + 0x0b0),
+      0x00000006,
+      'AUDIOOUT BIST must complete with DONE and PASS after START',
+    );
+
+    /* W1C status bits: SET raises, base write preserves, CLR clears. */
+    await machine.writel(AUDIODAC_BASE + 0x004, 0x0000000c);
+    assert.equal(
+      (await machine.readl(AUDIODAC_BASE + 0x000)) & 0xc,
+      0xc,
+      'AUDIOOUT CTRL_SET must raise the FIFO error status bits',
+    );
+    await machine.writel(AUDIODAC_BASE + 0x000, 0);
+    assert.equal(
+      (await machine.readl(AUDIODAC_BASE + 0x000)) & 0xc,
+      0xc,
+      'AUDIOOUT FIFO error status must survive general writes (W1C only)',
+    );
+    await machine.writel(AUDIODAC_BASE + 0x008, 0x0000000c);
+    assert.equal(
+      (await machine.readl(AUDIODAC_BASE + 0x000)) & 0xc,
+      0,
+      'AUDIOOUT CTRL_CLR must clear the FIFO error status bits',
+    );
+
+    /* RUN drop auto-sets CLKGATE (PDF Table 991). */
+    await machine.writel(AUDIODAC_BASE + 0x008, 0xc0000000);
+    await machine.writel(AUDIODAC_BASE + 0x004, 0x00000001);
+    await machine.writel(AUDIODAC_BASE + 0x008, 0x00000001);
+    assert.equal(
+      (await machine.readl(AUDIODAC_BASE + 0x000)) & 0x40000000,
+      0x40000000,
+      'AUDIOOUT clearing RUN must set CLKGATE',
+    );
+
+    /* SFTRST resets digital state but not POR-only analog registers. */
+    await machine.writel(AUDIODAC_BASE + 0x008, 0xc0000000);
+    await machine.writel(AUDIODAC_BASE + 0x050, 0x03017f7f);
+    await machine.writel(AUDIODAC_BASE + 0x030, 0x03ff01ff);
+    await machine.writel(AUDIODAC_BASE + 0x004, 0x80000000);
+    assert.equal(
+      await machine.readl(AUDIODAC_BASE + 0x000),
+      0xc0000000,
+      'AUDIOOUT SFTRST must restore the CTRL reset contract',
+    );
+    assert.equal(
+      await machine.readl(AUDIODAC_BASE + 0x030),
+      0x01fe01fe,
+      'AUDIOOUT SFTRST must reset the digital volume register',
+    );
+    assert.equal(
+      await machine.readl(AUDIODAC_BASE + 0x050),
+      0x03017f7f,
+      'AUDIOOUT SFTRST must preserve the POR-only headphone register',
+    );
+  });
+}
+
+async function testAudiooutFifoAndDmaContract() {
+  await withMachine(async (machine) => {
+    const descriptor = 0x00000500;
+    const buffer = 0x00001000;
+    const channel1Nxtcmdar = APBX_BASE + 0x0c0;
+    const channel1Sema = APBX_BASE + 0x0f0;
+
+    await machine.writel(AUDIODAC_BASE + 0x008, 0xc0000000);
+    await machine.writel(AUDIODAC_BASE + 0x004, 0x00000002);
+
+    /* APBX channel 1: PIO CTRL (RUN + IRQ enable) then 16 bytes to DATA. */
+    const cmd =
+      (16 << 16) | /* XFER_COUNT */
+      (1 << 12) |  /* CMDWORDS */
+      (1 << 6) |   /* SEMAPHORE */
+      (1 << 3) |   /* IRQONCMPLT */
+      2;           /* DMA_READ (MXS convention: memory -> peripheral) */
+    await machine.writel(APBX_BASE + 0x008, 0xc0000000);
+    await machine.writel(APBX_BASE + 0x014, 1 << 9);
+    for (const [i, word] of [0x11111111, 0x22222222, 0x33333333, 0x44444444].entries()) {
+      await machine.writel(buffer + 4 * i, word);
+    }
+    await machine.writel(descriptor + 0x00, 0);
+    await machine.writel(descriptor + 0x04, cmd);
+    await machine.writel(descriptor + 0x08, buffer);
+    await machine.writel(descriptor + 0x0c, 0x00000003);
+    await machine.writel(channel1Nxtcmdar, descriptor);
+    await machine.writel(channel1Sema, 1);
+    assert.notEqual(
+      (await machine.readl(ICOLL_BASE + 0x040)) & (1 << 5),
+      0,
+      'APBX channel 1 completion must assert the DAC DMA source on ICOLL',
+    );
+    assert.equal(
+      (await machine.readl(AUDIODAC_BASE + 0x040)) & 1,
+      1,
+      'AUDIOOUT DEBUG must report FIFO space below capacity',
+    );
+
+    /* Fill the 8-word FIFO, then let the stream drain to underflow. */
+    for (const word of [0x55555555, 0x66666666, 0x77777777, 0x88888888]) {
+      await machine.writel(AUDIODAC_BASE + 0x0f0, word);
+    }
+    assert.equal(
+      (await machine.readl(AUDIODAC_BASE + 0x040)) & 1,
+      0,
+      'AUDIOOUT DEBUG must report a full FIFO',
+    );
+    await machine.clockStep(200000);
+    assert.notEqual(
+      (await machine.readl(AUDIODAC_BASE + 0x000)) & 8,
+      0,
+      'AUDIOOUT must raise FIFO_UNDERFLOW_IRQ after the stream starves',
+    );
+    assert.notEqual(
+      (await machine.readl(ICOLL_BASE + 0x040)) & (1 << 6),
+      0,
+      'AUDIOOUT FIFO error must assert ICOLL source 6',
+    );
+
+    /* Overflow on pushing past the full FIFO. */
+    for (let i = 0; i < 9; i++) {
+      await machine.writel(AUDIODAC_BASE + 0x0f0, 0x1000 + i);
+    }
+    assert.notEqual(
+      (await machine.readl(AUDIODAC_BASE + 0x000)) & 4,
+      0,
+      'AUDIOOUT must raise FIFO_OVERFLOW_IRQ when the FIFO is overfilled',
+    );
+
+    /* RUN drop auto-sets CLKGATE and stops the stream. */
+    await machine.writel(AUDIODAC_BASE + 0x008, 0x00000001);
+    assert.equal(
+      (await machine.readl(AUDIODAC_BASE + 0x000)) & 0x40000000,
+      0x40000000,
+      'AUDIOOUT clearing RUN must set CLKGATE',
+    );
+  });
+}
+
+async function testAudioinRegisterContract() {
+  await withMachine(async (machine) => {
+    const resets = [
+      [0x000, 0xc00000c0, 'CTRL'],
+      [0x010, 0x80000000, 'STAT'],
+      [0x020, 0x10110037, 'ADCSRR'],
+      [0x030, 0x00fe00fe, 'ADCVOLUME'],
+      [0x040, 0x00000000, 'ADCDEBUG'],
+      [0x050, 0x01000000, 'ADCVOL'],
+      [0x060, 0x00000000, 'MICLINE'],
+      [0x070, 0x80000040, 'ANACLKCTRL'],
+      [0x080, 0x00000000, 'DATA'],
+      [0x200, 0x01010000, 'VERSION'],
+    ];
+    for (const [offset, value, name] of resets) {
+      assert.equal(
+        await machine.readl(AUDIOADC_BASE + offset),
+        value,
+        `AUDIOIN ${name} must have its documented reset value`,
+      );
+    }
+    assert.equal(
+      await machine.readl(AUDIOADC_BASE + 0x004),
+      0,
+      'AUDIOIN CTRL_SET must read as zero (SCT alias contract)',
+    );
+
+    /* Clear the status latched by the DATA reset-value read above. */
+    await machine.writel(AUDIOADC_BASE + 0x008, 0x0000000c);
+    const masks = [
+      [0x000, 0x3fffffff, 0x001f07f3, 'CTRL'],
+      [0x020, 0xffffffff, 0xf71f1fff, 'ADCSRR'],
+      [0x030, 0xffffffff, 0x02ff00ff, 'ADCVOLUME'],
+      [0x040, 0xffffffff, 0x80000000, 'ADCDEBUG'],
+      [0x050, 0xffffffff, 0x03003f3f, 'ADCVOL'],
+      [0x060, 0xffffffff, 0x21370033, 'MICLINE'],
+      [0x070, 0xffffffff, 0x80000077, 'ANACLKCTRL'],
+    ];
+    for (const [offset, input, value, name] of masks) {
+      await machine.writel(AUDIOADC_BASE + offset, input);
+      assert.equal(
+        await machine.readl(AUDIOADC_BASE + offset),
+        value,
+        `AUDIOIN ${name} must mask reserved bits read-only`,
+      );
+    }
+    await machine.writel(AUDIOADC_BASE + 0x010, 0);
+    assert.equal(
+      await machine.readl(AUDIOADC_BASE + 0x010),
+      0x80000000,
+      'AUDIOIN STAT must ignore writes (read-only)',
+    );
+
+    /* W1C status bits and the RUN->CLKGATE transition. */
+    await machine.writel(AUDIOADC_BASE + 0x004, 0x0000000c);
+    assert.equal(
+      (await machine.readl(AUDIOADC_BASE + 0x000)) & 0xc,
+      0xc,
+      'AUDIOIN CTRL_SET must raise the FIFO error status bits',
+    );
+    await machine.writel(AUDIOADC_BASE + 0x008, 0x0000000c);
+    assert.equal(
+      (await machine.readl(AUDIOADC_BASE + 0x000)) & 0xc,
+      0,
+      'AUDIOIN CTRL_CLR must clear the FIFO error status bits',
+    );
+    await machine.writel(AUDIOADC_BASE + 0x008, 0xc0000000);
+    await machine.writel(AUDIOADC_BASE + 0x004, 0x00000001);
+    await machine.writel(AUDIOADC_BASE + 0x008, 0x00000001);
+    assert.equal(
+      (await machine.readl(AUDIOADC_BASE + 0x000)) & 0x40000000,
+      0x40000000,
+      'AUDIOIN clearing RUN must set CLKGATE',
+    );
+
+    /* SFTRST resets digital state but not POR-only analog registers. */
+    await machine.writel(AUDIOADC_BASE + 0x008, 0xc0000000);
+    await machine.writel(AUDIOADC_BASE + 0x050, 0x03003f3f);
+    await machine.writel(AUDIOADC_BASE + 0x030, 0x02ff00ff);
+    await machine.writel(AUDIOADC_BASE + 0x004, 0x80000000);
+    assert.equal(
+      await machine.readl(AUDIOADC_BASE + 0x030),
+      0x00fe00fe,
+      'AUDIOIN SFTRST must reset the digital volume register',
+    );
+    assert.equal(
+      await machine.readl(AUDIOADC_BASE + 0x050),
+      0x03003f3f,
+      'AUDIOIN SFTRST must preserve the POR-only ADC mux register',
+    );
+  });
+}
+
+async function testAudioinFifoAndDmaContract() {
+  await withMachine(async (machine) => {
+    const descriptor = 0x00000500;
+    const buffer = 0x00001000;
+    const channel0Nxtcmdar = APBX_BASE + 0x050;
+    const channel0Sema = APBX_BASE + 0x080;
+
+    await machine.writel(AUDIOADC_BASE + 0x008, 0xc0000000);
+    await machine.writel(AUDIOADC_BASE + 0x004, 0x00000003);
+
+    /* Samples collect into the 8-word FIFO at the SRR rate. */
+    await machine.clockStep(100000);
+    assert.equal(
+      (await machine.readl(AUDIOADC_BASE + 0x040)) & 1,
+      1,
+      'AUDIOIN DEBUG must report collected FIFO data',
+    );
+    await machine.clockStep(100000);
+    assert.notEqual(
+      (await machine.readl(AUDIOADC_BASE + 0x000)) & 4,
+      0,
+      'AUDIOIN must raise FIFO_OVERFLOW_IRQ when the FIFO is not drained',
+    );
+    assert.notEqual(
+      (await machine.readl(ICOLL_BASE + 0x040)) & (1 << 8),
+      0,
+      'AUDIOIN FIFO error must assert ICOLL source 8',
+    );
+    assert.equal(
+      (await machine.readl(AUDIOADC_BASE + 0x040)) & 2,
+      2,
+      'AUDIOIN DEBUG DMA_PREQ must toggle once 8 words are collected',
+    );
+
+    /* APBX channel 0 pulls two words out of the FIFO. */
+    const cmd =
+      (8 << 16) |  /* XFER_COUNT */
+      (1 << 12) |  /* CMDWORDS */
+      (1 << 6) |   /* SEMAPHORE */
+      (1 << 3) |   /* IRQONCMPLT */
+      1;           /* DMA_WRITE (MXS convention: peripheral -> memory) */
+    await machine.writel(APBX_BASE + 0x008, 0xc0000000);
+    await machine.writel(APBX_BASE + 0x014, 1 << 8);
+    await machine.writel(descriptor + 0x00, 0);
+    await machine.writel(descriptor + 0x04, cmd);
+    await machine.writel(descriptor + 0x08, buffer);
+    await machine.writel(descriptor + 0x0c, 0x00000003);
+    await machine.writel(channel0Nxtcmdar, descriptor);
+    await machine.writel(channel0Sema, 1);
+    assert.notEqual(
+      (await machine.readl(ICOLL_BASE + 0x040)) & (1 << 7),
+      0,
+      'APBX channel 0 completion must assert the ADC DMA source on ICOLL',
+    );
+    assert.equal(
+      await machine.readl(buffer),
+      0,
+      'AUDIOIN DMA must deliver the FIFO samples (silent without a voice)',
+    );
+
+    /* CPU reads drain the FIFO; reading past empty underflows. */
+    await machine.writel(AUDIOADC_BASE + 0x008, 0x00000001);
+    await machine.writel(AUDIOADC_BASE + 0x008, 0x40000000);
+    for (let i = 0; i < 8; i++) {
+      await machine.readl(AUDIOADC_BASE + 0x080);
+    }
+    assert.equal(
+      (await machine.readl(AUDIOADC_BASE + 0x040)) & 1,
+      0,
+      'AUDIOIN DEBUG must report an empty FIFO after CPU reads',
+    );
+    await machine.readl(AUDIOADC_BASE + 0x080);
+    assert.notEqual(
+      (await machine.readl(AUDIOADC_BASE + 0x000)) & 8,
+      0,
+      'AUDIOIN must raise FIFO_UNDERFLOW_IRQ when the FIFO is read empty',
+    );
+  });
+}
+
 async function testLcdifDataAccessContract() {
   await withMachine(async (machine) => {
     const ctrl = 0x00030001;
@@ -9204,6 +9889,14 @@ const tests = [
   ['DCP channel error recovery contract', testDcpChannelErrorRecoveryContract],
   ['DCP context switch contract', testDcpContextSwitchContract],
   ['DCP CSC contract', testDcpCscContract],
+  ['SPDIF register contract', testSpdifRegisterContract],
+  ['SPDIF FIFO and DMA contract', testSpdifFifoAndDmaContract],
+  ['DRI register contract', testDriRegisterContract],
+  ['DRI IRQ and DMA contract', testDriIrqAndDmaContract],
+  ['AUDIOOUT register contract', testAudiooutRegisterContract],
+  ['AUDIOOUT FIFO and DMA contract', testAudiooutFifoAndDmaContract],
+  ['AUDIOIN register contract', testAudioinRegisterContract],
+  ['AUDIOIN FIFO and DMA contract', testAudioinFifoAndDmaContract],
   ['LCDIF data access contract', testLcdifDataAccessContract],
   ['PINCTRL CTRL contract', testPinctrlCtrl],
   ['PINCTRL Bank 3 absence', testPinctrlBank3Absent],

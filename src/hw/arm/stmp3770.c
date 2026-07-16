@@ -182,6 +182,8 @@ static void stmp3770_dig_reset(void *opaque)
     device_cold_reset(DEVICE(s->lcdif));
     device_cold_reset(DEVICE(s->audio_dac));
     device_cold_reset(DEVICE(s->audio_adc));
+    device_cold_reset(DEVICE(s->spdif));
+    device_cold_reset(DEVICE(s->dri));
     device_cold_reset(DEVICE(s->pwm));
     device_cold_reset(DEVICE(s->lradc));
     device_cold_reset(DEVICE(s->usbphy));
@@ -305,6 +307,15 @@ static void stmp3770_init(Object *obj)
     object_property_add_child(obj, "audio-adc", OBJECT(s->audio_adc));
     object_unref(OBJECT(s->audio_adc));
 
+    /* Initialize SPDIF transmitter and Digital Radio Interface */
+    s->spdif = STMP3770_SPDIF(object_new(TYPE_STMP3770_SPDIF));
+    object_property_add_child(obj, "spdif", OBJECT(s->spdif));
+    object_unref(OBJECT(s->spdif));
+
+    s->dri = STMP3770_DRI(object_new(TYPE_STMP3770_DRI));
+    object_property_add_child(obj, "dri", OBJECT(s->dri));
+    object_unref(OBJECT(s->dri));
+
     /* Initialize PWM controller */
     s->pwm = STMP3770_PWM(object_new(TYPE_STMP3770_PWM));
     object_property_add_child(obj, "pwm", OBJECT(s->pwm));
@@ -423,6 +434,7 @@ static void stmp3770_realize(DeviceState *dev, Error **errp)
                        qdev_get_gpio_in(DEVICE(s->icoll), STMP3770_IRQ_DCP_VMI));
     sysbus_connect_irq(SYS_BUS_DEVICE(s->dcp), 1,
                        qdev_get_gpio_in(DEVICE(s->icoll), STMP3770_IRQ_DCP));
+    stmp3770_dcp_set_ocotp(s->dcp, s->ocotp);
 
     /* Realize digital controller (DIGCTL) */
     if (!sysbus_realize(SYS_BUS_DEVICE(s->digctl), errp)) {
@@ -587,6 +599,28 @@ static void stmp3770_realize(DeviceState *dev, Error **errp)
                        qdev_get_gpio_in(DEVICE(s->icoll), STMP3770_IRQ_ADC_ERROR));
 
     stmp3770_audio_adc_set_dma(s->audio_adc, s->apbx_dma, 0);
+
+    /* Realize SPDIF transmitter */
+    if (!sysbus_realize(SYS_BUS_DEVICE(s->spdif), errp)) {
+        return;
+    }
+    sysbus_mmio_map(SYS_BUS_DEVICE(s->spdif), 0, STMP3770_SPDIF_ADDR);
+
+    sysbus_connect_irq(SYS_BUS_DEVICE(s->spdif), 0,
+                       qdev_get_gpio_in(DEVICE(s->icoll), STMP3770_IRQ_SPDIF_ERROR));
+
+    stmp3770_spdif_set_dma(s->spdif, s->apbx_dma, 2);
+
+    /* Realize Digital Radio Interface */
+    if (!sysbus_realize(SYS_BUS_DEVICE(s->dri), errp)) {
+        return;
+    }
+    sysbus_mmio_map(SYS_BUS_DEVICE(s->dri), 0, STMP3770_DRI_ADDR);
+
+    sysbus_connect_irq(SYS_BUS_DEVICE(s->dri), 0,
+                       qdev_get_gpio_in(DEVICE(s->icoll), STMP3770_IRQ_DRI_ERROR));
+
+    stmp3770_dri_set_dma(s->dri, s->apbx_dma, 5);
 
     /* Realize PWM controller */
     if (!sysbus_realize(SYS_BUS_DEVICE(s->pwm), errp)) {
