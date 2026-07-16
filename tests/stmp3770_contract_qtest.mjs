@@ -6411,6 +6411,94 @@ async function testDcpCscRegisterMapContract() {
   });
 }
 
+async function testDcpSctAliasContract() {
+  await withMachine(async (machine) => {
+    /* Reset DCP to known state. */
+    await machine.writel(DCP_BASE + 0x004, 0xc0800000);
+    await machine.writel(DCP_BASE + 0x008, 0xc0800000);
+
+    /*
+     * CSCSTAT (0x310) has SET only per PDF Table 649.
+     * CLR (0x318) and TOG (0x31c) must be rejected.
+     */
+    await machine.writel(DCP_BASE + 0x310, 0x00ff0035);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x310),
+      0x00ff0035,
+      'DCP CSCSTAT direct write must populate documented fields',
+    );
+    await machine.writel(DCP_BASE + 0x318, 0x00ff0035);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x310),
+      0x00ff0035,
+      'DCP CSCSTAT_CLR must be rejected (undocumented alias)',
+    );
+    await machine.writel(DCP_BASE + 0x31c, 0x00ff0035);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x310),
+      0x00ff0035,
+      'DCP CSCSTAT_TOG must be rejected (undocumented alias)',
+    );
+    /* SET alias must work. */
+    await machine.writel(DCP_BASE + 0x310, 0x00000000);
+    await machine.writel(DCP_BASE + 0x314, 0x00000001);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x310),
+      0x00000001,
+      'DCP CSCSTAT_SET must set the COMPLETE bit',
+    );
+
+    /*
+     * CH0 STAT (0x120) has SET + CLR but no TOG per PDF Table 649.
+     * CH0 OPTS (0x130) has SET + CLR but no TOG.
+     */
+    await machine.writel(DCP_BASE + 0x120, 0x00ff003e);
+    await machine.writel(DCP_BASE + 0x12c, 0x00ff003e);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x120),
+      0x00ff003e,
+      'DCP CH0STAT_TOG must be rejected (undocumented alias)',
+    );
+    await machine.writel(DCP_BASE + 0x130, 0x0000ffff);
+    await machine.writel(DCP_BASE + 0x13c, 0x0000ffff);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x130),
+      0x0000ffff,
+      'DCP CH0OPTS_TOG must be rejected (undocumented alias)',
+    );
+
+    /*
+     * CH1 STAT (0x160) has SET + CLR but no TOG.
+     * CH1 OPTS (0x170) has SET + CLR + TOG (TOG is documented).
+     */
+    await machine.writel(DCP_BASE + 0x160, 0x00ff003e);
+    await machine.writel(DCP_BASE + 0x16c, 0x00ff003e);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x160),
+      0x00ff003e,
+      'DCP CH1STAT_TOG must be rejected (undocumented alias)',
+    );
+    await machine.writel(DCP_BASE + 0x170, 0x0000aaaa);
+    await machine.writel(DCP_BASE + 0x17c, 0x0000ffff);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x170),
+      0x00005555,
+      'DCP CH1OPTS_TOG must toggle documented bits',
+    );
+
+    /*
+     * CH2/CH3 STAT and OPTS have full SET + CLR + TOG.
+     */
+    await machine.writel(DCP_BASE + 0x1a0, 0x00ff003e);
+    await machine.writel(DCP_BASE + 0x1ac, 0x0000003e);
+    assert.equal(
+      await machine.readl(DCP_BASE + 0x1a0),
+      0x00ff0000,
+      'DCP CH2STAT_TOG must toggle documented error bits',
+    );
+  });
+}
+
 async function testLcdifDataAccessContract() {
   await withMachine(async (machine) => {
     const ctrl = 0x00030001;
@@ -8264,6 +8352,7 @@ const tests = [
   ['DCP channel register map contract', testDcpChannelRegisterMapContract],
   ['DCP key and context register contract', testDcpKeyAndContextRegisterContract],
   ['DCP CSC register map contract', testDcpCscRegisterMapContract],
+  ['DCP SCT alias contract', testDcpSctAliasContract],
   ['LCDIF data access contract', testLcdifDataAccessContract],
   ['PINCTRL CTRL contract', testPinctrlCtrl],
   ['PINCTRL Bank 3 absence', testPinctrlBank3Absent],

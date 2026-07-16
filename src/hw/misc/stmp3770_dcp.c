@@ -56,6 +56,23 @@
 #define REG_CLR                     0x8
 #define REG_TOG                     0xc
 
+/*
+ * Per-channel SCT alias availability per PDF Table 649 (address table):
+ *
+ *   CH0 STAT: SET + CLR (no TOG)    CH0 OPTS: SET + CLR (no TOG)
+ *   CH1 STAT: SET + CLR (no TOG)    CH1 OPTS: SET + CLR + TOG
+ *   CH2 STAT: SET + CLR + TOG       CH2 OPTS: SET + CLR + TOG
+ *   CH3 STAT: SET + CLR + TOG       CH3 OPTS: SET + CLR + TOG
+ *
+ * CSCSTAT: SET only (no CLR, no TOG).
+ */
+static const bool dcp_ch_stat_has_tog[DCP_CHANNELS] = {
+    false, false, true, true,
+};
+static const bool dcp_ch_opts_has_tog[DCP_CHANNELS] = {
+    false, true, true, true,
+};
+
 #define CTRL_SFTRST                 (1U << 31)
 #define CTRL_CLKGATE                (1U << 30)
 #define CTRL_PRESENT_MASK           (3U << 28)
@@ -464,8 +481,11 @@ static void dcp_write(void *opaque, hwaddr offset, uint64_t value,
                                     CSCCTRL0_WRITABLE_MASK, modifier);
         return;
     case REG_CSCSTAT:
-        s->cscstat = dcp_apply_sct(s->cscstat, val,
-                                   CSCSTAT_WRITABLE_MASK, modifier);
+        /* PDF Table 649: CSCSTAT has SET only, no CLR/TOG. */
+        if (modifier == 0 || modifier == REG_SET) {
+            s->cscstat = dcp_apply_sct(s->cscstat, val,
+                                       CSCSTAT_WRITABLE_MASK, modifier);
+        }
         return;
     case REG_CSCOUTBUFPARAM:
         if (modifier == 0) {
@@ -543,10 +563,16 @@ static void dcp_write(void *opaque, hwaddr offset, uint64_t value,
         }
         break;
     case REG_CH_STAT:
+        if (modifier == REG_TOG && !dcp_ch_stat_has_tog[ch]) {
+            break;
+        }
         s->ch_stat[ch] = dcp_apply_sct(s->ch_stat[ch], val,
                                        CH_STAT_WRITABLE_MASK, modifier);
         break;
     case REG_CH_OPTS:
+        if (modifier == REG_TOG && !dcp_ch_opts_has_tog[ch]) {
+            break;
+        }
         s->ch_opts[ch] = dcp_apply_sct(s->ch_opts[ch], val,
                                        CH_OPTS_WRITABLE_MASK, modifier);
         break;
