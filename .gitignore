@@ -13,6 +13,7 @@ config.log
 
 # Python
 __pycache__/
+.pytest_cache/
 *.py[cod]
 *$py.class
 *.egg-info/
@@ -41,6 +42,7 @@ venv/
 .opencode
 .omo
 CLAUDE.md
+.devin
 
 # 临时/一次性脚本与 QEMU 配置产物
 /.gdbinit

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Analyze STMP3770 mask ROM content for boot loader logic extraction."""
 
+import os
 import struct
 import sys
 from capstone import Cs, CS_ARCH_ARM, CS_MODE_ARM, CS_MODE_LITTLE_ENDIAN
@@ -148,7 +149,7 @@ def analyze_irq_handler(data):
     disasm(data, irq_off, 32)
 
 def main():
-    rom_path = sys.argv[1] if len(sys.argv) > 1 else 'D:/UserData/Downloads/maskrom64K'
+    rom_path = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser('~/Downloads/maskrom64K')
     data = load_rom(rom_path)
 
     print(f"ROM size: {len(data)} bytes")

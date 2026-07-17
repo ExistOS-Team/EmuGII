@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Disassemble specific functions from STMP3770 mask ROM."""
+import os
 import struct
 import sys
 from capstone import Cs, CS_ARCH_ARM, CS_MODE_ARM, CS_MODE_LITTLE_ENDIAN
@@ -46,7 +47,7 @@ def disasm_range(data, offset, count, name=None):
         print(f'  0x{insn.address:08X}: 0x{raw:08X}  {insn.mnemonic:8s} {insn.op_str}')
 
 def main():
-    rom_path = sys.argv[1] if len(sys.argv) > 1 else 'D:/UserData/Downloads/maskrom64K'
+    rom_path = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser('~/Downloads/maskrom64K')
     data = load_rom(rom_path)
 
     # Key functions from reset handler call chain

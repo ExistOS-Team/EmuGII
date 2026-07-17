@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Decode constant pool values and peripheral addresses in STMP3770 mask ROM."""
+import os
 import struct
 from capstone import Cs, CS_ARCH_ARM, CS_MODE_ARM, CS_MODE_LITTLE_ENDIAN
 
@@ -129,7 +130,7 @@ def analyze_str_targets(data, func_offset, func_size):
                     print(f'  0x{insn.address:08X}: str {src_reg}({src_desc}) -> [{dst_reg}] = 0x{addr:08X} ({desc})')
 
 def main():
-    data = load_rom('D:/UserData/Downloads/maskrom64K')
+    data = load_rom(os.path.expanduser('~/Downloads/maskrom64K'))
 
     # Analyze reset handler peripheral writes
     print('=' * 60)
@@ -198,7 +199,7 @@ def main():
     print('\n' + '=' * 60)
     print('Checking maskromread_block (3) - 1MB file')
     print('=' * 60)
-    with open('D:/UserData/Downloads/maskromread_block (3)', 'rb') as f:
+    with open(os.path.expanduser('~/Downloads/maskromread_block (3)'), 'rb') as f:
         block_data = f.read(4096)  # Read first 4KB
     print(f'First 32 bytes: {block_data[:32].hex()}')
     # Check if it starts with NCB signature
@@ -211,9 +212,9 @@ def main():
     print('\n' + '=' * 60)
     print('Checking OSLoader.sb')
     print('=' * 60)
-    with open('D:/UserData/Downloads/OSLoader.sb', 'rb') as f:
+    with open(os.path.expanduser('~/Downloads/OSLoader.sb'), 'rb') as f:
         sb_data = f.read(256)
-    print(f'Size: {len(open("D:/UserData/Downloads/OSLoader.sb", "rb").read())} bytes')
+    print(f'Size: {len(open(os.path.expanduser("~/Downloads/OSLoader.sb"), "rb").read())} bytes')
     print(f'First 32 bytes: {sb_data[:32].hex()}')
     # SB file header starts with signature bytes
     # Check for SB signature (usually starts with 0x00 or specific magic)

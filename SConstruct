@@ -5,6 +5,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 
 from build_helpers import (
     collect_release_files,
@@ -435,18 +436,29 @@ def run_stmp3770_qtest(target, source, env):
     """Run the host-side STMP3770 qtest contract checks."""
     marker_path = str(target[0])
     qemu_build_dir = os.path.abspath(os.path.dirname(str(source[0])))
-    script_path = os.path.join(PROJECT_ROOT, 'tests', 'stmp3770_contract_qtest.mjs')
     env_vars, _ = prepare_bash_env(env['ENV'])
-    node_exe = find_executable('node', env_vars['PATH'])
+
     env_vars['EMUGII_QEMU_BINARY'] = os.path.join(
         qemu_build_dir,
         'qemu-system-arm.exe' if os.name == 'nt' else 'qemu-system-arm',
     )
     env_vars['EMUGII_QEMU_CWD'] = qemu_build_dir
 
+    qtest_filter = os.environ.get('EMUGII_QTEST_FILTER')
+    if qtest_filter:
+        env_vars['EMUGII_QTEST_FILTER'] = qtest_filter
+
+    # Prefer running pytest through uv; fall back to the active python interpreter.
+    uv_exe = shutil.which('uv', path=env_vars.get('PATH'))
+    if uv_exe:
+        cmd = [uv_exe, 'run', 'pytest', 'tests/stmp3770_contract', '-q']
+    else:
+        python_exe = sys.executable
+        cmd = [python_exe, '-m', 'pytest', 'tests/stmp3770_contract', '-q']
+
     print(">>> 运行 STMP3770 qtest 契约回归...")
     result = subprocess.run(
-        [node_exe, script_path],
+        cmd,
         cwd=PROJECT_ROOT,
         env=env_vars,
     )
@@ -506,7 +518,7 @@ packaged_qemu = env.Command(
 
 stmp3770_qtest = env.Command(
     os.path.join(BUILD_DIR, 'tests', '.stmp3770_qtest'),
-    [built_qemu, os.path.join(TESTS_DIR, 'stmp3770_contract_qtest.mjs')],
+    [built_qemu],
     run_stmp3770_qtest
 )
 AlwaysBuild(stmp3770_qtest)
@@ -533,6 +545,7 @@ arm_env = Environment(
     CC='arm-none-eabi-gcc',
     AS='arm-none-eabi-as',
     LD='arm-none-eabi-ld',
+    LINK='$LD',
     OBJCOPY='arm-none-eabi-objcopy',
     ENV=os.environ
 )
@@ -541,35 +554,73 @@ arm_env = Environment(
 arm_env.Append(
     CFLAGS=['-mcpu=arm926ej-s', '-mthumb-interwork', '-nostdlib',
             '-ffreestanding', '-O2', '-Wall'],
-    LINKFLAGS=['-T', 'tests/stmp3770.ld', '-nostdlib'],
+    CPPPATH=['tests/baremetal'],
 )
 
 # 构建测试程序
-TEST_BUILD = os.path.join(BUILD_DIR, 'tests')
+TEST_BUILD = os.path.join(BUILD_DIR, 'tests', 'baremetal')
 
-# 编译 hello.c
-hello_obj = arm_env.Object(
-    os.path.join(TEST_BUILD, 'hello.o'),
-    'tests/hello.c'
+# 公共 UART 实现
+uart_src = 'tests/baremetal/common/uart.c'
+uart_obj = arm_env.Object(
+    os.path.join(TEST_BUILD, 'common', 'uart.o'),
+    uart_src
 )
 
-# 链接 hello.elf
-hello_elf = arm_env.Command(
-    os.path.join(TEST_BUILD, 'hello.elf'),
-    hello_obj,
-    '$LD $LINKFLAGS -o $TARGET $SOURCES'
-)
+# 自动构建所有 baremetal 子目录下的测试程序
+baremetal_bins = []
+for src in Glob('tests/baremetal/*/*.c'):
+    src_path = os.path.normpath(str(src))
+    if src_path == os.path.normpath(uart_src):
+        continue
+    name = os.path.splitext(os.path.basename(src_path))[0]
+    periph = os.path.basename(os.path.dirname(src_path))
+    target_dir = os.path.join(TEST_BUILD, periph)
+    target = os.path.join(target_dir, name)
+    # nand_payload 使用独立的 linker script 加载到 0x40010000
+    if name == 'nand_payload':
+        ld_script = 'tests/baremetal/nand/nand_payload.ld'
+    else:
+        ld_script = 'tests/baremetal/common/stmp3770.ld'
+    test_env = arm_env.Clone(LINKFLAGS=['-T', ld_script, '-nostdlib'])
+    test_obj = test_env.Object(target + '.o', src)
+    test_elf = test_env.Program(target + '.elf', [test_obj, uart_obj])
+    test_bin = test_env.Command(
+        target + '.bin',
+        test_elf,
+        '$OBJCOPY -O binary $SOURCE $TARGET'
+    )
+    baremetal_bins.append(test_bin)
 
-# 生成 hello.bin
-hello_bin = arm_env.Command(
-    os.path.join(TEST_BUILD, 'hello.bin'),
-    hello_elf,
-    '$OBJCOPY -O binary $SOURCE $TARGET'
-)
+arm_env.Alias('baremetal', baremetal_bins)
+arm_env.Clean(baremetal_bins, os.path.join(BUILD_DIR, 'tests'))
 
-# 测试别名
-arm_env.Alias('test', hello_bin)
-arm_env.Clean(hello_bin, TEST_BUILD)
+
+def run_unit_tests(target, source, env):
+    """运行 host-side Python unit tests."""
+    uv = shutil.which('uv', path=env['ENV'].get('PATH'))
+    if uv:
+        cmd = [uv, 'run', 'pytest', 'tests/unit', '-q']
+    else:
+        cmd = [sys.executable, '-m', 'pytest', 'tests/unit', '-q']
+    test_env = env['ENV'].copy()
+    existing = test_env.get('PYTHONPATH', '')
+    if existing:
+        test_env['PYTHONPATH'] = PROJECT_ROOT + os.pathsep + existing
+    else:
+        test_env['PYTHONPATH'] = PROJECT_ROOT
+    print(">>> 运行 Python unit tests...")
+    result = subprocess.run(cmd, cwd=PROJECT_ROOT, env=test_env)
+    if result.returncode != 0:
+        print("错误: Python unit tests 失败")
+    return result.returncode
+
+
+pyunit_marker = os.path.join(BUILD_DIR, 'tests', '.pyunit')
+pyunit = env.Command(pyunit_marker, [], run_unit_tests)
+AlwaysBuild(pyunit)
+
+arm_env.Alias('test', baremetal_bins + [pyunit])
 
 # 帮助信息
 Help("""
@@ -581,7 +632,9 @@ EmuGII 构建系统
   scons qemu         - 构建 QEMU
   scons package      - 复制二进制、依赖库和默认镜像到 build/EmuGii
   scons qtest        - 构建 QEMU 并运行 STMP3770 qtest 契约回归
-  scons test         - 编译测试程序
+  scons baremetal    - 编译 tests/baremetal 下所有裸机测试程序
+  scons test         - 编译裸机测试并运行 Python unit tests
+  scons qtest        - 构建 QEMU 并运行 STMP3770 qtest 契约回归
   scons -c           - 清理构建目录
 
 构建过程:
@@ -593,16 +646,22 @@ EmuGII 构建系统
   6. 复制运行产物到 build/EmuGii
 
 测试程序:
-  scons qtest        - 运行 host-side qtest 回归脚本
-  scons test         - 编译 tests/hello.c 到 build/tests/hello.bin
+  scons baremetal    - 编译 tests/baremetal/*/*.c 到 build/tests/baremetal/*/*.bin
+  scons test         - 编译裸机测试 + 运行 tests/unit (pytest)
+  scons qtest        - 运行 host-side qtest 契约回归 (pytest)
+
+环境变量:
+  EMUGII_QTEST_FILTER - 只运行名称/描述匹配子串的 qtest 契约
 
 生成的二进制文件:
   build/qemu/build/qemu-system-arm       - QEMU 模拟器
   build/EmuGii/EmuGii                    - 可运行发布目录中的 EmuGII 模拟器
-  build/tests/hello.bin                  - 测试程序
+  build/tests/baremetal/*/*.bin          - 裸机测试程序
 
 运行测试:
-  node tests/stmp3770_contract_qtest.mjs
-  build/qemu/build/qemu-system-arm -M stmp3770 -kernel build/tests/hello.bin -nographic
+  uv run pytest tests/unit -q
+  uv run pytest tests/stmp3770_contract -q
+  $env:EMUGII_QTEST_FILTER='RTC'; uv run pytest tests/stmp3770_contract -q
+  build/qemu/build/qemu-system-arm -M stmp3770 -kernel build/tests/baremetal/hello/hello.bin -nographic
   build/EmuGii/EmuGii
 """)
