@@ -298,7 +298,9 @@ static uint64_t uartdbg_read(void *opaque, hwaddr offset, unsigned size)
 {
     STMP3770UARTDebugState *s = STMP3770_UARTDBG(opaque);
 
-    if (size != 4) {
+    /* Allow byte/halfword/word reads for firmware that accesses DR with
+     * narrow loads. */
+    if (size != 1 && size != 2 && size != 4) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "stmp3770-uartdbg: unsupported read size %u at offset "
                       HWADDR_FMT_plx "\n", size, offset);
@@ -344,7 +346,10 @@ static void uartdbg_write(void *opaque, hwaddr offset, uint64_t value,
     STMP3770UARTDebugState *s = STMP3770_UARTDBG(opaque);
     uint8_t ch;
 
-    if (size != 4) {
+    /* The PL011-style UART allows byte, halfword and word accesses to the
+     * data register.  Firmware (e.g. ExistOS) routinely writes single bytes
+     * to DR for character output. */
+    if (size != 1 && size != 2 && size != 4) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "stmp3770-uartdbg: unsupported write size %u at offset "
                       HWADDR_FMT_plx "\n", size, offset);
