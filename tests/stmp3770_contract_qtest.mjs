@@ -10147,9 +10147,9 @@ function buildSbImage(opts) {
   const sectHdr = Buffer.alloc(16, 0);
   sectHdr.writeUInt32LE(0, 0);  // section_number = 0
   sectHdr.writeUInt32LE(0, 4);  // section_offset = 0 (after TAG)
-  // section_size: TAG(1) + LOAD cmd(1) + data blocks + JUMP cmd(1)
+  // section_size: LOAD cmd(1) + data blocks + JUMP cmd(1) (excludes TAG)
   const payloadBlocks = Math.ceil(opts.payload.length / SB_BLOCK_SIZE_JS);
-  const sectionSize = 1 + 1 + payloadBlocks + 1;
+  const sectionSize = 1 + payloadBlocks + 1;
   sectHdr.writeUInt32LE(sectionSize, 8);  // section_size
   sectHdr.writeUInt32LE(1, 12);  // section_flags = BOOTABLE
 
@@ -10180,8 +10180,8 @@ function buildSbImage(opts) {
   const payloadPadded = Buffer.alloc(payloadBlocks * SB_BLOCK_SIZE_JS, 0);
   opts.payload.copy(payloadPadded);
 
-  // Total image blocks
-  const totalBlocks = firstBootTagBlock + sectionSize;
+  // Total image blocks: TAG(1) + section data (sectionSize)
+  const totalBlocks = firstBootTagBlock + 1 + sectionSize;
   // Update header fields
   header.writeUInt32LE(totalBlocks, 28);  // image_blocks
   header.writeUInt32LE(firstBootTagBlock, 32);  // first_boot_tag_block
@@ -10514,6 +10514,217 @@ async function testNandBootContract() {
   }
 }
 
+/*
+ * ExistOS-format SB image contract: plaintext header + key dictionary
+ * with real_key-encrypted section data.
+ *
+ * ExistOS uses a non-standard SB layout where the header and section
+ * headers are stored in plaintext (SHA-1 prefix + STMP header), and
+ * only the key dictionary and section data are encrypted.  The key
+ * dictionary's second 16-byte block contains the real_key encrypted
+ * with the zero image key.  Section data (TAG/LOAD/JUMP) is then
+ * encrypted with the real_key.
+ */
+async function testSbImageExistOsFormat() {
+  const tmpDir = os.tmpdir();
+  const sbPath = path.join(tmpDir,
+    `stmp3770_sb_existos_${process.pid}_${Date.now()}.sb`);
+
+  /* Payload: 4 bytes written to loadAddr */
+  const payload = Buffer.alloc(4, 0);
+  payload.writeUInt32LE(0xDEADBEEF, 0);
+  const loadAddr = 0x00001000;
+  const jumpAddr = 0x00002000;
+  const jumpArg = 0xCAFEBABE;
+
+  /* Pad payload to 16-byte boundary */
+  const payloadBlocks = Math.ceil(payload.length / SB_BLOCK_SIZE_JS);
+  const loadPadded = Buffer.alloc(payloadBlocks * SB_BLOCK_SIZE_JS, 0);
+  payload.copy(loadPadded);
+
+  /* Layout:
+   *   header (6 blocks = 96 bytes, plaintext)
+   *   section header (1 block, plaintext)
+   *   key dictionary (2 blocks = 32 bytes, encrypted with zero key)
+   *   TAG (1 block, encrypted with real_key)
+   *   LOAD cmd + data + JUMP cmd (section_size blocks, encrypted with real_key)
+   *   SHA-1 digest (2 blocks, encrypted with real_key)
+   */
+  const headerBlocks = 6;
+  const sectHdrBlocks = 1;
+  const keyDictBlocks = 2;  /* 1 key × 2 blocks */
+  const tagBlock = headerBlocks + sectHdrBlocks + keyDictBlocks;  /* block 9 */
+  const sectionSize = 1 + payloadBlocks + 1;  /* LOAD + data + JUMP */
+  const digestBlocks = 2;
+  const totalBlocks = tagBlock + 1 + sectionSize + digestBlocks;
+
+  /* Build plaintext header (96 bytes) */
+  const headerPt = Buffer.alloc(96, 0);
+  /* bytes 0-19: SHA-1 digest (filled in later) */
+  /* bytes 20-23: signature 'STMP' */
+  headerPt.write('STMP', 20, 'ascii');
+  /* bytes 24-25: major=1, minor=1 */
+  headerPt[24] = 1;
+  headerPt[25] = 1;
+  /* bytes 26-27: flags = 0 */
+  headerPt.writeUInt16LE(0, 26);
+  /* bytes 28-31: image_blocks */
+  headerPt.writeUInt32LE(totalBlocks, 28);
+  /* bytes 32-35: first_boot_tag_block */
+  headerPt.writeUInt32LE(tagBlock, 32);
+  /* bytes 36-39: first_boot_section_id = 0 */
+  headerPt.writeUInt32LE(0, 36);
+  /* bytes 40-41: key_count = 1 */
+  headerPt.writeUInt16LE(1, 40);
+  /* bytes 42-43: key_dictionary_block */
+  headerPt.writeUInt16LE(headerBlocks + sectHdrBlocks, 42);
+  /* bytes 44-45: header_blocks = 6 */
+  headerPt.writeUInt16LE(headerBlocks, 44);
+  /* bytes 46-47: section_count = 1 */
+  headerPt.writeUInt16LE(1, 46);
+  /* bytes 48-49: section_header_size = 1 */
+  headerPt.writeUInt16LE(1, 48);
+  /* bytes 52-55: signature2 'sgtl' */
+  headerPt.write('sgtl', 52, 'ascii');
+  /* bytes 64-65: product version major */
+  headerPt.writeUInt16LE(1, 64);
+  /* bytes 76-77: component version major */
+  headerPt.writeUInt16LE(1, 76);
+  /* bytes 88-89: drive_tag = 0x50 */
+  headerPt.writeUInt16LE(0x50, 88);
+
+  /* Compute SHA-1 of header_tail (bytes 20-96) and prepend as digest */
+  const headerTail = headerPt.subarray(20);
+  const sha1 = crypto.createHash('sha1').update(headerTail).digest();
+  sha1.copy(headerPt, 0);
+
+  /* Section header (16 bytes, plaintext) */
+  const sectHdr = Buffer.alloc(16, 0);
+  sectHdr.writeUInt32LE(0, 0);   /* section_number = 0 */
+  sectHdr.writeUInt32LE(tagBlock + 1, 4);  /* section_offset (absolute block) */
+  sectHdr.writeUInt32LE(sectionSize, 8);   /* section_size */
+  sectHdr.writeUInt32LE(1, 12);  /* section_flags = BOOTABLE */
+
+  /* Generate random real_key */
+  const realKey = crypto.randomBytes(16);
+  const zeroKey = Buffer.alloc(16, 0);
+
+  /* saved_iv = header[:16] (SHA-1 digest prefix) */
+  const savedIv = Buffer.from(headerPt.subarray(0, 16));
+
+  /* Key dictionary: [CBC-MAC(16), encrypted_real_key(16)] */
+  /* CBC-MAC = last 16 bytes of AES-CBC(header+sect_hdr) with zero key, IV=0 */
+  const cbcMacIv = Buffer.alloc(16, 0);
+  const cbcMacCipher = crypto.createCipheriv('aes-128-cbc', zeroKey, cbcMacIv);
+  cbcMacCipher.setAutoPadding(false);
+  const cbcMacData = Buffer.concat([headerPt, sectHdr]);
+  const cbcMacResult = Buffer.concat([
+    cbcMacCipher.update(cbcMacData),
+    cbcMacCipher.final(),
+  ]);
+  const cbcMac = cbcMacResult.subarray(cbcMacResult.length - 16);
+
+  /* Encrypt real_key with zero key using saved_iv */
+  const keyEncIv = Buffer.from(savedIv);
+  const keyEncCipher = crypto.createCipheriv('aes-128-cbc', zeroKey, keyEncIv);
+  keyEncCipher.setAutoPadding(false);
+  const encRealKey = Buffer.concat([
+    keyEncCipher.update(realKey),
+    keyEncCipher.final(),
+  ]);
+
+  const keyDict = Buffer.concat([cbcMac, encRealKey]);
+
+  /* Build section plaintext: TAG + LOAD + data + JUMP */
+  /* TAG command */
+  const tagCmd = Buffer.alloc(16, 0);
+  tagCmd[1] = 0x01;  /* ROM_TAG_CMD */
+  tagCmd.writeUInt16LE(0x0001, 2);  /* flags = LAST_TAG */
+  tagCmd.writeUInt32LE(0, 4);   /* section_id = 0 */
+  tagCmd.writeUInt32LE(sectionSize, 8);  /* length_blocks */
+  tagCmd.writeUInt32LE(1, 12);  /* flags = BOOTABLE */
+  /* checksum */
+  let cksum = 90;
+  for (let i = 1; i < 16; i++) cksum = (cksum + tagCmd[i]) & 0xFF;
+  tagCmd[0] = cksum;
+
+  /* LOAD command */
+  const loadCmd = Buffer.alloc(16, 0);
+  loadCmd[1] = 0x02;  /* ROM_LOAD_CMD */
+  loadCmd.writeUInt32LE(loadAddr, 4);
+  loadCmd.writeUInt32LE(payload.length, 8);
+  /* CRC32 of payload */
+  const crc = crc32ofBuffer(payload);
+  loadCmd.writeUInt32LE(crc, 12);
+  cksum = 90;
+  for (let i = 1; i < 16; i++) cksum = (cksum + loadCmd[i]) & 0xFF;
+  loadCmd[0] = cksum;
+
+  /* JUMP command */
+  const jumpCmd = Buffer.alloc(16, 0);
+  jumpCmd[1] = 0x04;  /* ROM_JUMP_CMD */
+  jumpCmd.writeUInt32LE(jumpAddr, 4);
+  jumpCmd.writeUInt32LE(0, 8);
+  jumpCmd.writeUInt32LE(jumpArg, 12);
+  cksum = 90;
+  for (let i = 1; i < 16; i++) cksum = (cksum + jumpCmd[i]) & 0xFF;
+  jumpCmd[0] = cksum;
+
+  /* Encrypt TAG with real_key using saved_iv */
+  const tagIv = Buffer.from(savedIv);
+  const tagCipher = crypto.createCipheriv('aes-128-cbc', realKey, tagIv);
+  tagCipher.setAutoPadding(false);
+  const encTag = Buffer.concat([tagCipher.update(tagCmd), tagCipher.final()]);
+
+  /* Encrypt section data (LOAD + payload + JUMP) with real_key using saved_iv */
+  const sectData = Buffer.concat([loadCmd, loadPadded, jumpCmd]);
+  const sectIv = Buffer.from(savedIv);
+  const sectCipher = crypto.createCipheriv('aes-128-cbc', realKey, sectIv);
+  sectCipher.setAutoPadding(false);
+  const encSectData = Buffer.concat([
+    sectCipher.update(sectData),
+    sectCipher.final(),
+  ]);
+
+  /* SHA-1 digest of entire file so far + 12 random bytes, then encrypt */
+  const fileSoFar = Buffer.concat([
+    headerPt, sectHdr, keyDict, encTag, encSectData,
+  ]);
+  const fileSha1 = crypto.createHash('sha1').update(fileSoFar).digest();
+  const digestPlain = Buffer.concat([fileSha1, crypto.randomBytes(12)]);
+  const digIv = Buffer.from(savedIv);
+  const digCipher = crypto.createCipheriv('aes-128-cbc', realKey, digIv);
+  digCipher.setAutoPadding(false);
+  const encDigest = Buffer.concat([
+    digCipher.update(digestPlain),
+    digCipher.final(),
+  ]);
+
+  /* Assemble final image */
+  const image = Buffer.concat([
+    headerPt, sectHdr, keyDict, encTag, encSectData, encDigest,
+  ]);
+
+  fs.writeFileSync(sbPath, image);
+
+  try {
+    await withMachine(async (machine) => {
+      /* Verify payload was loaded */
+      const loaded = await machine.readl(loadAddr);
+      assert.equal(loaded, 0xDEADBEEF,
+        `ExistOS SB LOAD did not write payload: got 0x${loaded.toString(16)}`);
+
+      /* Verify JUMP was executed */
+      assert.match(machine.stderr, /STMP3770 SB: JUMP to 0x00002000/i,
+        `ExistOS SB JUMP not logged: ${machine.stderr}`);
+      assert.match(machine.stderr, /r0=0xcafebabe/i,
+        `ExistOS SB JUMP r0 arg not logged: ${machine.stderr}`);
+    }, ['-M', 'stmp3770,sb-image=' + sbPath]);
+  } finally {
+    try { fs.unlinkSync(sbPath); } catch (e) { /* ignore */ }
+  }
+}
+
 const tests = [
   ['RTC 1ms IRQ routing', testRtc1MsecIrq],
   ['RTC reset and persistent0 contract', testRtcResetAndPersistent0Contract],
@@ -10680,6 +10891,7 @@ const tests = [
   ['SB image LOAD and JUMP contract', testSbImageLoadAndJump],
   ['SB image FILL command contract', testSbImageFillCommand],
   ['NAND boot NCB/LDLB contract', testNandBootContract],
+  ['SB image ExistOS format contract', testSbImageExistOsFormat],
 ];
 
 const filter = process.env.EMUGII_QTEST_FILTER;

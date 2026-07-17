@@ -489,22 +489,58 @@ static bool stmp3770_sb_parse_execute(STMP3770BoardState *s,
     /* Get the image key (zero for unencrypted, OCOTP CRYPTO_KEY for encrypted) */
     sb_get_image_key(s, image_key);
 
-    /* Save the last ciphertext block of the header area — it is the IV
-     * for decrypting the section headers (the CBC chain continues from
-     * the header into the section headers during encryption). */
-    uint32_t hdr_bytes = sizeof(SBBootImageHeader);
+    /*
+     * Detect whether the header is stored in plaintext (ExistOS-style SB
+     * images keep the header and section headers unencrypted, encrypting
+     * only the key dictionary and section data with a random real_key).
+     * Standard elftosb images AES-CBC encrypt the entire header with the
+     * image key.  If the signature is already 'STMP' at offset 20, the
+     * header is plaintext and we skip header/section-header decryption.
+     */
+    bool plaintext_header = (ldl_le_p(hdr->signature1) == SB_SIGNATURE_STMP);
+
+    /* Save the first 16 bytes as the IV for section data decryption.
+     * In encrypted-header images this is the ciphertext of the first block;
+     * in plaintext-header images it is the SHA-1 digest prefix. */
+    memcpy(saved_iv, data, SB_BLOCK_SIZE);
+
+    /* IV for section header decryption (only used in encrypted-header mode) */
     uint8_t sect_hdr_iv[SB_BLOCK_SIZE];
-    memcpy(sect_hdr_iv, data + hdr_bytes - SB_BLOCK_SIZE, SB_BLOCK_SIZE);
 
-    /* Initialize AES-128 CBC decrypt with image key and IV = image key */
-    AES_set_decrypt_key(image_key, 128, &aes_key);
-    sb_aes_cbc_decrypt(&aes_key, data, hdr_bytes, image_key);
+    if (!plaintext_header) {
+        /* Save the last ciphertext block of the header area — it is the IV
+         * for decrypting the section headers (the CBC chain continues from
+         * the header into the section headers during encryption). */
+        uint32_t hdr_bytes = sizeof(SBBootImageHeader);
+        memcpy(sect_hdr_iv, data + hdr_bytes - SB_BLOCK_SIZE, SB_BLOCK_SIZE);
 
-    /* Verify signature */
-    if (ldl_le_p(hdr->signature1) != SB_SIGNATURE_STMP) {
-        error_report("STMP3770 SB: bad signature 0x%08x (expected 0x%08x)",
-                     ldl_le_p(hdr->signature1), SB_SIGNATURE_STMP);
-        return false;
+        /* Initialize AES-128 CBC decrypt with image key and IV = image key */
+        AES_set_decrypt_key(image_key, 128, &aes_key);
+        sb_aes_cbc_decrypt(&aes_key, data, hdr_bytes, image_key);
+
+        /* Verify signature after decryption */
+        if (ldl_le_p(hdr->signature1) != SB_SIGNATURE_STMP) {
+            error_report("STMP3770 SB: bad signature 0x%08x (expected 0x%08x)",
+                         ldl_le_p(hdr->signature1), SB_SIGNATURE_STMP);
+            return false;
+        }
+
+        /* Decrypt section headers (immediately after the header) */
+        off = hdr->header_blocks * SB_BLOCK_SIZE;
+        uint32_t sect_hdr_size = hdr->section_count * hdr->section_header_size
+                                 * SB_BLOCK_SIZE;
+        if (off + sect_hdr_size > size) {
+            error_report("STMP3770 SB: section headers exceed image size");
+            return false;
+        }
+        sb_aes_cbc_decrypt(&aes_key, data + off, sect_hdr_size, sect_hdr_iv);
+    } else {
+        /* Plaintext header: verify signature directly */
+        if (ldl_le_p(hdr->signature1) != SB_SIGNATURE_STMP) {
+            error_report("STMP3770 SB: bad signature 0x%08x (expected 0x%08x)",
+                         ldl_le_p(hdr->signature1), SB_SIGNATURE_STMP);
+            return false;
+        }
     }
 
     hdr_blocks = hdr->header_blocks;
@@ -519,11 +555,12 @@ static bool stmp3770_sb_parse_execute(STMP3770BoardState *s,
         return false;
     }
 
-    info_report("STMP3770 SB: v%u.%u, %u blocks, %u sections, %u keys",
+    info_report("STMP3770 SB: v%u.%u, %u blocks, %u sections, %u keys%s",
                 hdr->major_version, hdr->minor_version,
-                hdr->image_blocks, hdr->section_count, hdr->key_count);
+                hdr->image_blocks, hdr->section_count, hdr->key_count,
+                plaintext_header ? " (plaintext header)" : "");
 
-    /* Decrypt section headers (immediately after the header) */
+    /* Section headers location */
     off = hdr_blocks * SB_BLOCK_SIZE;
     uint32_t sect_hdr_size = hdr->section_count * hdr->section_header_size
                              * SB_BLOCK_SIZE;
@@ -531,8 +568,21 @@ static bool stmp3770_sb_parse_execute(STMP3770BoardState *s,
         error_report("STMP3770 SB: section headers exceed image size");
         return false;
     }
-    sb_aes_cbc_decrypt(&aes_key, data + off, sect_hdr_size, sect_hdr_iv);
+    if (!plaintext_header) {
+        sb_aes_cbc_decrypt(&aes_key, data + off, sect_hdr_size, sect_hdr_iv);
+    }
     SBSectionsHeader *sects = (SBSectionsHeader *)(data + off);
+
+    /*
+     * For plaintext-header images, the key dictionary is encrypted with
+     * the image key (zero key) using saved_iv as IV, and each entry's
+     * second 16-byte block is the real_key encrypted by the image key.
+     * We extract the real_key and use it for section data decryption.
+     * For encrypted-header images, the key dictionary is also encrypted
+     * with the image key, and the real_key is similarly extracted.
+     */
+    uint8_t real_key[SB_BLOCK_SIZE];
+    bool have_real_key = false;
 
     /* Decrypt key dictionary (if present) */
     if (hdr->key_count > 0) {
@@ -542,9 +592,27 @@ static bool stmp3770_sb_parse_execute(STMP3770BoardState *s,
             error_report("STMP3770 SB: key dictionary exceeds image size");
             return false;
         }
-        /* Reinit AES with saved IV for key dictionary decryption */
-        sb_aes_cbc_decrypt(&aes_key, data + key_off, key_size, saved_iv);
+        /*
+         * Each key dictionary entry is 32 bytes:
+         *   [0:16]  CBC-MAC of header+section-headers (not encrypted, a MAC)
+         *   [16:32] real_key encrypted with image_key using saved_iv as IV
+         * We only need to decrypt the second 16-byte block of each entry.
+         */
+        AES_set_decrypt_key(image_key, 128, &aes_key);
+        SBKeyDictionaryKey *kd = (SBKeyDictionaryKey *)(data + key_off);
+        for (uint16_t ki = 0; ki < hdr->key_count; ki++) {
+            sb_aes_cbc_decrypt_block(&aes_key, saved_iv, kd[ki].key);
+        }
+        memcpy(real_key, kd->key, SB_BLOCK_SIZE);
+        have_real_key = true;
     }
+
+    /*
+     * Set up the AES key for section data decryption.
+     * If we extracted a real_key from the key dictionary, use it;
+     * otherwise use the image key (for zero-key unencrypted images).
+     */
+    AES_set_decrypt_key(have_real_key ? real_key : image_key, 128, &aes_key);
 
     /* Find the bootable section and execute its commands */
     bool found_boot = false;
@@ -567,8 +635,10 @@ static bool stmp3770_sb_parse_execute(STMP3770BoardState *s,
             break;
         }
 
-        /* Decrypt and execute commands in this section */
-        uint32_t sect_end = tag_block + sh->section_size;
+        /* Decrypt and execute commands in this section.
+         * section_size counts blocks after the TAG (LOAD cmd + data + JUMP),
+         * so the section spans [tag_block+1 .. tag_block+1+section_size). */
+        uint32_t sect_end = tag_block + 1 + sh->section_size;
         if (sect_end > total_blocks) {
             sect_end = total_blocks;
         }
@@ -598,9 +668,8 @@ static bool stmp3770_sb_parse_execute(STMP3770BoardState *s,
                 /* TAG marks the start of a section; reinit IV */
                 memcpy(cmd_iv, saved_iv, SB_BLOCK_SIZE);
                 cur_block++;
-                if (cmd->flags & ROM_TAG_CMD_FLAG_LAST_TAG) {
-                    jumped = true; /* stop after last tag */
-                }
+                /* LAST_TAG means no more sections follow, but the current
+                 * section's commands still need to be executed. */
                 break;
 
             case ROM_LOAD_CMD: {
