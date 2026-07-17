@@ -1433,7 +1433,10 @@ static void gpmi_reset(DeviceState *dev)
     s->stat = GPMI_STAT_PRESENT | GPMI_STAT_FIFO_EMPTY;
     s->debug = 0;
     s->active_dma_channel = -1;
-    memset(s->ready_state, 0, sizeof(s->ready_state));
+    /* In the synchronous NAND model the chip is always ready; drive R/B#
+     * high so WAIT_FOR_READY completes immediately unless firmware explicitly
+     * clears it (e.g. via a NAND command that transitions to BUSY). */
+    memset(s->ready_state, 1, sizeof(s->ready_state));
     for (channel = 0; channel < STMP3770_GPMI_NUM_CS; channel++) {
         s->wait[channel].pending = false;
         s->wait[channel].timeout = false;
