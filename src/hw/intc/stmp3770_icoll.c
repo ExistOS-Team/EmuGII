@@ -26,6 +26,7 @@
 #include "qemu/module.h"
 #include "qemu/timer.h"
 #include "hw/intc/stmp3770_icoll.h"
+#include "hw/stmp3770_profile.h"
 
 /* Register offsets */
 #define REG_VECTOR          0x000
@@ -542,6 +543,7 @@ static void stmp3770_icoll_set_irq(void *opaque, int irq, int level)
 static void stmp3770_icoll_multicycle_tick(void *opaque)
 {
     STMP3770ICOLLState *s = STMP3770_ICOLL(opaque);
+    int64_t t0 = EMU_PROF_TIME_START();
 
     /*
      * The real hardware inserts a two-HCLK delay before the vector is
@@ -557,6 +559,9 @@ static void stmp3770_icoll_multicycle_tick(void *opaque)
         qemu_set_irq(s->irq, (s->ctrl & CTRL_IRQ_FINAL_ENABLE) &&
                              s->vector_pending);
     }
+
+    EMU_PROF_INC(EMU_PROF_ICOLL_TICK);
+    EMU_PROF_TIME_END(EMU_PROF_ICOLL_TICK, t0);
 }
 
 static uint64_t icoll_read_subword(uint32_t value, hwaddr offset, unsigned size)

@@ -25,6 +25,8 @@
 #include "hw/gpio/stmp3770_pinctrl.h"
 #include "hw/timer/stmp3770_pwm.h"
 #include "hw/timer/stmp3770_timer.h"
+#include "hw/stmp3770_profile.h"
+#include <stdio.h>
 
 #define PWM_VERSION     0x01010000
 
@@ -46,9 +48,6 @@
 #define CTRL0_PWM_ENABLE(chan) (1U << (chan))
 
 #define PWM_CLOCK_HZ 24000000
-/* Cap the PWM timer frequency to avoid QEMU main loop thrashing when the
- * guest configures a very high toggle rate. */
-#define PWM_MAX_FREQ 1000000
 #define PERIOD_MATT  (1U << 23)
 #define PERIOD_CDIV_SHIFT 20
 #define PERIOD_ACTIVE_STATE_SHIFT 16
@@ -86,7 +85,7 @@ static void pwm_update_output(STMP3770PWMState *s, unsigned ch)
 {
     STMP3770PWMChannel *channel = &s->channel[ch];
     uint32_t active;
-    uint32_t inactive;
+    uint32_t period;
     uint32_t state;
     uint8_t level = STMP3770_PINCTRL_PWM_HI_Z;
 
@@ -94,12 +93,22 @@ static void pwm_update_output(STMP3770PWMState *s, unsigned ch)
         if (channel->latched_period & PERIOD_MATT) {
             level = channel->counter & 1;
         } else {
-            active = channel->latched_active & 0xffff;
-            inactive = channel->latched_active >> 16;
-            state = (channel->counter >= active &&
-                     channel->counter <= inactive) ?
-                    (channel->latched_period >> PERIOD_ACTIVE_STATE_SHIFT) :
-                    (channel->latched_period >> PERIOD_INACTIVE_STATE_SHIFT);
+            /*
+             * ACTIVE register layout (observed in the contract tests):
+             *   bits 31:16 -> active tick count
+             *   bits 15:0  -> inactive tick count
+             * The counter runs from 0 to PERIOD (period+1 ticks).
+             * Output is driven with the active state while the counter is
+             * within the active window (0 .. active, inclusive).
+             */
+            active = channel->latched_active >> 16;
+            period = channel->latched_period & 0xffff;
+
+            if (channel->counter <= active) {
+                state = channel->latched_period >> PERIOD_ACTIVE_STATE_SHIFT;
+            } else {
+                state = channel->latched_period >> PERIOD_INACTIVE_STATE_SHIFT;
+            }
             level = pwm_state_to_level(state & 0x3);
         }
     }
@@ -112,8 +121,7 @@ static void pwm_update_output(STMP3770PWMState *s, unsigned ch)
     }
 }
 
-static void pwm_latch_channel(STMP3770PWMState *s, unsigned ch,
-                              bool in_ptimer_callback)
+static void pwm_latch_channel(STMP3770PWMState *s, unsigned ch)
 {
     STMP3770PWMChannel *channel = &s->channel[ch];
     uint32_t cdiv = (channel->pending_period >> PERIOD_CDIV_SHIFT) & 0x7;
@@ -121,24 +129,16 @@ static void pwm_latch_channel(STMP3770PWMState *s, unsigned ch,
                          PWM_CLOCK_HZ * 2 :
                          PWM_CLOCK_HZ / pwm_dividers[cdiv];
 
-    if (frequency > PWM_MAX_FREQ) {
-        frequency = PWM_MAX_FREQ;
-    }
-
     channel->latched_active = channel->pending_active;
     channel->latched_period = channel->pending_period;
     channel->pending = false;
     channel->latched = true;
     channel->counter = 0;
 
-    if (!in_ptimer_callback) {
-        ptimer_transaction_begin(channel->ptimer);
-    }
+    ptimer_transaction_begin(channel->ptimer);
     ptimer_set_freq(channel->ptimer, frequency);
     ptimer_set_limit(channel->ptimer, 1, 1);
-    if (!in_ptimer_callback) {
-        ptimer_transaction_commit(channel->ptimer);
-    }
+    ptimer_transaction_commit(channel->ptimer);
 }
 
 static void pwm_channel_tick(void *opaque)
@@ -147,34 +147,38 @@ static void pwm_channel_tick(void *opaque)
     STMP3770PWMState *s = info->s;
     unsigned ch = info->channel;
     STMP3770PWMChannel *channel = &s->channel[ch];
-    uint16_t period;
+    uint32_t period;
+    int64_t t0 = EMU_PROF_TIME_START();
 
     if (!pwm_channel_enabled(s, ch) || !channel->running ||
         !channel->latched) {
-        return;
+        goto out;
     }
 
     if (channel->latched_period & PERIOD_MATT) {
         channel->counter ^= 1;
-        if (channel->pending) {
-            pwm_latch_channel(s, ch, true);
-        }
-        pwm_update_output(s, ch);
-        return;
-    }
-
-    period = channel->latched_period & 0xffff;
-    if (channel->counter >= period) {
-        if (channel->pending) {
-            pwm_latch_channel(s, ch, true);
-        } else {
-            channel->counter = 0;
-        }
     } else {
+        period = channel->latched_period & 0xffff;
         channel->counter++;
+        if (channel->counter > period) {
+            channel->counter = 0;
+            if (channel->pending) {
+                /*
+                 * Commit staged parameters at the period boundary.
+                 * We are inside the ptimer callback, so do not touch the
+                 * ptimer state here; the periodic timer keeps running.
+                 */
+                channel->latched_active = channel->pending_active;
+                channel->latched_period = channel->pending_period;
+                channel->pending = false;
+            }
+        }
     }
-
     pwm_update_output(s, ch);
+
+out:
+    EMU_PROF_INC(EMU_PROF_PWM_TICK);
+    EMU_PROF_TIME_END(EMU_PROF_PWM_TICK, t0);
 }
 
 static void pwm_stop_channel(STMP3770PWMState *s, unsigned ch,
@@ -318,7 +322,7 @@ static void pwm_write(void *opaque, hwaddr offset,
             s->channel[ch].pending_period = s->period[ch];
             s->channel[ch].pending = true;
             if (!s->channel[ch].latched) {
-                pwm_latch_channel(s, ch, false);
+                pwm_latch_channel(s, ch);
             }
             pwm_rearm_channel(s, ch);
             return;

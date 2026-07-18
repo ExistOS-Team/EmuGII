@@ -25,6 +25,7 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "trace.h"
+#include "hw/stmp3770_profile.h"
 
 #define GPMI_VERSION_VALUE  0x02000000
 
@@ -357,6 +358,7 @@ static uint32_t gpmi_data_read(STMP3770GPMIState *s, unsigned size)
 {
     uint32_t value = 0;
     unsigned i;
+    int64_t t0 = EMU_PROF_TIME_START();
 
     for (i = 0; i < size; i++) {
         uint8_t byte = 0xFF;
@@ -365,6 +367,8 @@ static uint32_t gpmi_data_read(STMP3770GPMIState *s, unsigned size)
         value |= (uint32_t)byte << (i * 8);
     }
 
+    EMU_PROF_INC(EMU_PROF_GPMI_DATA);
+    EMU_PROF_TIME_END(EMU_PROF_GPMI_DATA, t0);
     return value;
 }
 
@@ -372,10 +376,14 @@ static void gpmi_data_write(STMP3770GPMIState *s, uint32_t value,
                             unsigned size)
 {
     unsigned i;
+    int64_t t0 = EMU_PROF_TIME_START();
 
     for (i = 0; i < size; i++) {
         gpmi_fifo_push_byte(s, value >> (i * 8));
     }
+
+    EMU_PROF_INC(EMU_PROF_GPMI_DATA);
+    EMU_PROF_TIME_END(EMU_PROF_GPMI_DATA, t0);
 }
 
 static void gpmi_write_ctrl1(STMP3770GPMIState *s, uint32_t value, int sct)
@@ -412,8 +420,12 @@ static void gpmi_write_ctrl1(STMP3770GPMIState *s, uint32_t value, int sct)
 static void gpmi_wait_timer_cb(void *opaque)
 {
     STMP3770GPMITimerCtx *ctx = opaque;
+    int64_t t0 = EMU_PROF_TIME_START();
 
     gpmi_complete_wait_for_ready(ctx->s, ctx->channel, true);
+
+    EMU_PROF_INC(EMU_PROF_GPMI_WAIT);
+    EMU_PROF_TIME_END(EMU_PROF_GPMI_WAIT, t0);
 }
 
 static void stmp3770_gpmi_rdy_busy_set(void *opaque, int n, int level)
@@ -494,10 +506,11 @@ static void gpmi_bch_complete_read(STMP3770GPMIState *s)
     unsigned int block;
     bool bus_error = false;
     bool first_transfer = true;
+    int64_t t0 = EMU_PROF_TIME_START();
 
     if (!bch || (bch->ctrl & (BCH_CTRL_SFTRST | BCH_CTRL_CLKGATE |
                               BCH_CTRL_AHBM_SFTRST | BCH_CTRL_COMPLETE_IRQ))) {
-        return;
+        goto gpmi_bch_out;
     }
 
     buffer_mask = s->eccctrl & GPMI_ECCCTRL_BUFFER_MASK_MASK;
@@ -586,6 +599,10 @@ static void gpmi_bch_complete_read(STMP3770GPMIState *s)
     s->ecc_complete_cnt++;
     s->page_read_cnt++;
     gpmi_log_progress(s, "ECC-read", s->nand_row);
+
+gpmi_bch_out:
+    EMU_PROF_INC(EMU_PROF_GPMI_TRANSFER);
+    EMU_PROF_TIME_END(EMU_PROF_GPMI_TRANSFER, t0);
 }
 
 static void gpmi_nand_reset_state(STMP3770GPMIState *s)

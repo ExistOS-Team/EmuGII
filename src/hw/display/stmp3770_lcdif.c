@@ -28,6 +28,7 @@
 #include "ui/surface.h"
 #include "ui/pixel_ops.h"
 #include "hw/display/framebuffer.h"
+#include "hw/stmp3770_profile.h"
 #include "hw/display/stmp3770_lcdif.h"
 #include "hw/display/hp39gii_frontpanel.h"
 
@@ -633,6 +634,7 @@ static void lcdif_update_display(void *opaque)
 static void lcdif_refresh(void *opaque)
 {
     STMP3770LCDIFState *s = opaque;
+    int64_t t0 = EMU_PROF_TIME_START();
 
     lcdif_update_display(s);
 
@@ -644,6 +646,9 @@ static void lcdif_refresh(void *opaque)
     timer_mod(s->refresh_timer,
               qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
               NS_PER_SEC / REFRESH_RATE_HZ);
+
+    EMU_PROF_INC(EMU_PROF_LCDIF_REFRESH);
+    EMU_PROF_TIME_END(EMU_PROF_LCDIF_REFRESH, t0);
 }
 
 static void lcdif_apply_sct(uint32_t *reg, uint32_t value, int sct)

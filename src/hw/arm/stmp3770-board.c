@@ -29,6 +29,7 @@
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "hw/arm/stmp3770.h"
+#include "hw/stmp3770_profile.h"
 #include "hw/boards.h"
 #include "hw/qdev-properties.h"
 #include "qemu/error-report.h"
@@ -49,6 +50,10 @@
 #include "crypto/aes.h"
 
 /* HP 39gII hardware: 512KB SRAM only, no external DRAM */
+uint64_t emu_profile_counts[EMU_PROF_NUM_EVENTS];
+uint64_t emu_profile_times_ns[EMU_PROF_NUM_EVENTS];
+EmuSvcHistEntry emu_svc_histogram[EMU_SVC_HIST_SIZE];
+
 #define STMP3770_BOARD_RAM_DEFAULT  (0)
 #define STMP3770_DEFAULT_ROM_NAME   "rom.bin"
 #define STMP3770_DEFAULT_FLASH_NAME "flash.bin"
@@ -70,6 +75,11 @@ struct STMP3770BoardState {
     /* Boot state machine state, exposed for introspection. */
     uint32_t boot_state;
     uint32_t boot_mode;
+
+    /* Profiling timer and snapshot times. */
+    QEMUTimer *prof_timer;
+    int64_t prof_last_real;
+    int64_t prof_last_virt;
 };
 
 static char *stmp3770_exec_dir_file(const char *name)
@@ -1301,6 +1311,111 @@ static void stmp3770_board_set_sb_image(Object *obj, const char *value,
     s->sb_image = g_strdup(value);
 }
 
+static void stmp3770_profile_dump(void *opaque)
+{
+    STMP3770BoardState *s = opaque;
+    int64_t real_now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    int64_t virt_now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    int64_t real_dt = real_now - s->prof_last_real;
+    int64_t virt_dt = virt_now - s->prof_last_virt;
+    double speed = real_dt > 0 ? (double)virt_dt / (double)real_dt : 0.0;
+    const char *names[EMU_PROF_NUM_EVENTS] = {
+        [EMU_PROF_ICOLL_TICK]      = "icoll",
+        [EMU_PROF_PWM_TICK]        = "pwm",
+        [EMU_PROF_TIMROT_TICK]     = "timrot",
+        [EMU_PROF_TIMROT_ROTARY]   = "rotary",
+        [EMU_PROF_DMA_RUN]         = "dma",
+        [EMU_PROF_LCDIF_REFRESH]   = "lcdif",
+        [EMU_PROF_FP_RENDER]       = "fp_render",
+        [EMU_PROF_GPMI_WAIT]       = "gpmi_wait",
+        [EMU_PROF_GPMI_TRANSFER]   = "gpmi_tx",
+        [EMU_PROF_GPMI_DATA]       = "gpmi_data",
+        [EMU_PROF_PINCTRL_KEY]     = "pinctrl_key",
+        [EMU_PROF_USB_FRINDEX]     = "usb_frindex",
+        [EMU_PROF_USB_GPTIMER]     = "usb_gptimer",
+        [EMU_PROF_USB_OTG1MS]      = "usb_otg1ms",
+        [EMU_PROF_USB_PORTRESET]   = "usb_portreset",
+        [EMU_PROF_USB_IRQ]         = "usb_irq",
+        [EMU_PROF_ARM_EXCEPTION]   = "arm_except",
+        [EMU_PROF_DATA_ABORT]      = "data_abort",
+        [EMU_PROF_PREFETCH_ABORT]  = "prefetch_abort",
+        [EMU_PROF_EXCP_SVC]        = "excp_svc",
+        [EMU_PROF_EXCP_IRQ]        = "excp_irq",
+        [EMU_PROF_EXCP_FIQ]        = "excp_fiq",
+        [EMU_PROF_EXCP_UDEF]       = "excp_udef",
+        [EMU_PROF_EXCP_BKPT]       = "excp_bkpt",
+        [EMU_PROF_EXCP_OTHER]      = "excp_other",
+    };
+    GString *line = g_string_new(NULL);
+
+    g_string_append_printf(line, "EMU-PROFILE speed=%.3f real_ns=%" PRId64
+                           " virt_ns=%" PRId64, speed, real_dt, virt_dt);
+
+    for (int i = 0; i < EMU_PROF_NUM_EVENTS; i++) {
+        uint64_t c = qatomic_read(&emu_profile_counts[i]);
+        uint64_t t = qatomic_read(&emu_profile_times_ns[i]);
+        if (c == 0) {
+            continue;
+        }
+        g_string_append_printf(line, " %s=%" PRIu64 "[%" PRIu64 "]",
+                               names[i], c, t / c);
+        qatomic_set(&emu_profile_counts[i], 0);
+        qatomic_set(&emu_profile_times_ns[i], 0);
+    }
+
+    error_report("%s", line->str);
+    g_string_free(line, TRUE);
+
+    /* Print top SVC PCs if any were observed this second. */
+    {
+        uint64_t svc_total = 0;
+        for (int i = 0; i < EMU_SVC_HIST_SIZE; i++) {
+            svc_total += emu_svc_histogram[i].count;
+        }
+        if (svc_total > 0) {
+            GString *hist = g_string_new("SVC-HIST");
+            for (int rank = 0; rank < 10; rank++) {
+                int best_idx = -1;
+                uint64_t best_count = 0;
+                for (int i = 0; i < EMU_SVC_HIST_SIZE; i++) {
+                    if (emu_svc_histogram[i].count > best_count) {
+                        best_count = emu_svc_histogram[i].count;
+                        best_idx = i;
+                    }
+                }
+                if (best_idx < 0 || best_count == 0) {
+                    break;
+                }
+                g_string_append_printf(hist, " 0x%08" PRIx32 ":%" PRIu64,
+                                      emu_svc_histogram[best_idx].pc,
+                                      best_count);
+                emu_svc_histogram[best_idx].count = 0;
+            }
+            error_report("%s", hist->str);
+            g_string_free(hist, TRUE);
+            memset(emu_svc_histogram, 0, sizeof(emu_svc_histogram));
+        }
+    }
+
+    s->prof_last_real = real_now;
+    s->prof_last_virt = virt_now;
+    timer_mod(s->prof_timer, real_now + 1000000000ULL);
+}
+
+void stmp3770_profile_init(MachineState *machine)
+{
+    STMP3770BoardState *s = STMP3770_BOARD(machine);
+
+    memset(emu_profile_counts, 0, sizeof(emu_profile_counts));
+    memset(emu_profile_times_ns, 0, sizeof(emu_profile_times_ns));
+    memset(emu_svc_histogram, 0, sizeof(emu_svc_histogram));
+
+    s->prof_last_real = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    s->prof_last_virt = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->prof_timer = timer_new_ns(QEMU_CLOCK_REALTIME, stmp3770_profile_dump, s);
+    timer_mod(s->prof_timer, s->prof_last_real + 1000000000ULL);
+}
+
 static void stmp3770_board_init(MachineState *machine)
 {
     STMP3770BoardState *s = STMP3770_BOARD(machine);
@@ -1352,6 +1467,9 @@ static void stmp3770_board_init(MachineState *machine)
         error_report("Failed to realize STMP3770 SoC");
         exit(1);
     }
+
+    /* Start real-time profiling dump for this board. */
+    stmp3770_profile_init(machine);
 
     /*
      * Simulate Boot ROM initialization.

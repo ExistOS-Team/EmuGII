@@ -26,6 +26,7 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "system/address-spaces.h"
+#include "hw/stmp3770_profile.h"
 
 /* Register offsets */
 #define REG_CTRL0           0x000
@@ -352,6 +353,8 @@ static void stmp3770_dma_run_channel(STMP3770DMAState *s, int ch_idx)
 {
     STMP3770DMAChannel *ch = &s->ch[ch_idx];
     uint32_t cmd = ch->loaded_cmd;
+
+    EMU_PROF_INC(EMU_PROF_DMA_RUN);
     unsigned int command = (cmd >> CMD_COMMAND_SHIFT) & CMD_COMMAND_MASK;
     bool irq_on_cmplt = (cmd & CMD_IRQONCMPLT) != 0;
     bool decrement_sema = (cmd & CMD_SEMAPHORE) != 0;

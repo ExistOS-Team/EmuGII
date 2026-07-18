@@ -29,6 +29,7 @@
 #include "ui/pixel_ops.h"
 #include "ui/vgafont.h"
 #include "hw/display/hp39gii_frontpanel.h"
+#include "hw/stmp3770_profile.h"
 
 /* ------------------------------------------------------------------ */
 /* Layout (canvas is HP39GII_FP_WIDTH x HP39GII_FP_HEIGHT)            */
@@ -1021,6 +1022,7 @@ void hp39gii_fp_render(QemuConsole *con, const uint8_t *vram,
     FPCtx ctx;
     bool backdrop_stale;
     size_t i;
+    int64_t t0 = EMU_PROF_TIME_START();
 
     ctx.surface = fp_prepare_surface(con);
     if (!ctx.surface) {
@@ -1057,6 +1059,9 @@ void hp39gii_fp_render(QemuConsole *con, const uint8_t *vram,
     } else {
         dpy_gfx_update(con, GLASS_X, GLASS_Y, GLASS_W, GLASS_H);
     }
+
+    EMU_PROF_INC(EMU_PROF_FP_RENDER);
+    EMU_PROF_TIME_END(EMU_PROF_FP_RENDER, t0);
 }
 
 int hp39gii_fp_key_at(int x, int y)

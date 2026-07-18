@@ -19,6 +19,7 @@
 #include "qemu/module.h"
 #include "system/address-spaces.h"
 #include "hw/usb/stmp3770_usb.h"
+#include "hw/stmp3770_profile.h"
 
 /* Register offsets */
 #define REG_ID              0x000
@@ -537,6 +538,7 @@ static void usb_frindex_tick(void *opaque)
 {
     STMP3770USBState *s = opaque;
     uint32_t next = (s->frindex + 1) & FRINDEX_MASK;
+    int64_t t0 = EMU_PROF_TIME_START();
 
     if (next == 0) {
         s->usbsts |= USBSTS_FRI;
@@ -544,11 +546,15 @@ static void usb_frindex_tick(void *opaque)
     s->frindex = next;
     s->usbsts |= USBSTS_SRI;
     usb_update_irq(s);
+
+    EMU_PROF_INC(EMU_PROF_USB_FRINDEX);
+    EMU_PROF_TIME_END(EMU_PROF_USB_FRINDEX, t0);
 }
 
 static void usb_port_reset_timeout(void *opaque)
 {
     STMP3770USBState *s = opaque;
+    int64_t t0 = EMU_PROF_TIME_START();
 
     s->portsc1 &= ~PORTSC1_PR;
     s->portsc1 |= PORTSC1_PE | PORTSC1_PEC;
@@ -562,15 +568,22 @@ static void usb_port_reset_timeout(void *opaque)
 
     s->usbsts |= USBSTS_PCI;
     usb_update_irq(s);
+
+    EMU_PROF_INC(EMU_PROF_USB_PORTRESET);
+    EMU_PROF_TIME_END(EMU_PROF_USB_PORTRESET, t0);
 }
 
 static void usb_otgsc_1ms_tick(void *opaque)
 {
     STMP3770USBState *s = opaque;
+    int64_t t0 = EMU_PROF_TIME_START();
 
     s->otgsc ^= OTGSC_ONEMST;
     s->otgsc |= OTGSC_ONEMSS;
     usb_update_irq(s);
+
+    EMU_PROF_INC(EMU_PROF_USB_OTG1MS);
+    EMU_PROF_TIME_END(EMU_PROF_USB_OTG1MS, t0);
 }
 
 static void usb_gptimer_configure(STMP3770USBState *s, unsigned int idx,
@@ -604,12 +617,16 @@ static void usb_gptimer_tick(void *opaque)
     STMP3770USBGPTimerCBInfo *info = opaque;
     STMP3770USBState *s = info->s;
     unsigned int idx = info->idx;
+    int64_t t0 = EMU_PROF_TIME_START();
 
     s->usbsts |= USBSTS_GPTIMER0 << idx;
     if (!(s->gptimer[idx] & GPTIMER_REPEAT)) {
         s->gptimer[idx] &= ~GPTIMER_RUN;
     }
     usb_update_irq(s);
+
+    EMU_PROF_INC(EMU_PROF_USB_GPTIMER);
+    EMU_PROF_TIME_END(EMU_PROF_USB_GPTIMER, t0);
 }
 
 static void usb_controller_reset(STMP3770USBState *s)

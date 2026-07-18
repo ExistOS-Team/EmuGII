@@ -1,0 +1,124 @@
+diff --git a/target/arm/helper.c b/target/arm/helper.c
+index 518c0c1..66d5d53 100644
+--- a/target/arm/helper.c
++++ b/target/arm/helper.c
+@@ -8,7 +8,9 @@
+ 
+ #include "qemu/osdep.h"
+ #include "qemu/log.h"
++#include "qemu/error-report.h"
+ #include "trace.h"
++#include "hw/stmp3770_profile.h"
+ #include "cpu.h"
+ #include "internals.h"
+ #include "cpu-features.h"
+@@ -9104,6 +9106,109 @@ void arm_cpu_do_interrupt(CPUState *cs)
+     CPUARMState *env = &cpu->env;
+     unsigned int new_el = env->exception.target_el;
+ 
++    EMU_PROF_INC(EMU_PROF_ARM_EXCEPTION);
++    switch (cs->exception_index) {
++    case EXCP_DATA_ABORT:
++        EMU_PROF_INC(EMU_PROF_DATA_ABORT);
++        break;
++    case EXCP_PREFETCH_ABORT:
++        EMU_PROF_INC(EMU_PROF_PREFETCH_ABORT);
++        break;
++    case EXCP_SWI: {
++        uint32_t svc_pc = env->regs[15] - (env->thumb ? 2 : 4);
++        unsigned idx = ((svc_pc >> 1) & (EMU_SVC_HIST_SIZE - 1));
++
++        EMU_PROF_INC(EMU_PROF_EXCP_SVC);
++        while (emu_svc_histogram[idx].pc &&
++               emu_svc_histogram[idx].pc != svc_pc) {
++            idx = (idx + 1) & (EMU_SVC_HIST_SIZE - 1);
++        }
++        emu_svc_histogram[idx].pc = svc_pc;
++        emu_svc_histogram[idx].count++;
++
++        if (svc_pc == 0x001046bc) {
++            static bool svc_dumped;
++            if (!svc_dumped) {
++                uint32_t buf[8];
++                uint32_t addr = svc_pc & ~3U;
++                int ret = cpu_memory_rw_debug(env_cpu(env), addr, buf,
++                                              sizeof(buf), 0);
++                if (ret == 0) {
++                    error_report("SVC-DUMP @ 0x%08x thumb=%d "
++                                 "r14=0x%08x r15=0x%08x words: "
++                                 "%08x %08x %08x %08x %08x %08x %08x %08x",
++                                 svc_pc, env->thumb, env->regs[14],
++                                 env->regs[15], buf[0], buf[1], buf[2],
++                                 buf[3], buf[4], buf[5], buf[6], buf[7]);
++
++                    /* Also dump the caller's code around LR. */
++                    uint32_t caller_addr = env->regs[14] & ~3U;
++                    uint32_t caller_buf[8];
++                    ret = cpu_memory_rw_debug(env_cpu(env), caller_addr - 16,
++                                              caller_buf, sizeof(caller_buf), 0);
++                    if (ret == 0) {
++                        error_report("SVC-CALLER @ 0x%08x words: "
++                                     "%08x %08x %08x %08x %08x %08x %08x %08x",
++                                     caller_addr - 16, caller_buf[0],
++                                     caller_buf[1], caller_buf[2],
++                                     caller_buf[3], caller_buf[4],
++                                     caller_buf[5], caller_buf[6],
++                                     caller_buf[7]);
++                    }
++
++                    /* Dump the bl target (0x00100fd0) and loop start (0x00106ff0). */
++                    {
++                        static const uint32_t addrs[] = {
++                            0x00100fd0, 0x00106ff0, 0x00107000
++                        };
++                        for (int a = 0; a < (int)(sizeof(addrs) / sizeof(addrs[0])); a++) {
++                            uint32_t abuf[16];
++                            ret = cpu_memory_rw_debug(env_cpu(env), addrs[a],
++                                                      abuf, sizeof(abuf), 0);
++                            if (ret == 0) {
++                                GString *s = g_string_new(NULL);
++                                g_string_append_printf(s, "SVC-AREA @ 0x%08x: ",
++                                                       addrs[a]);
++                                for (int w = 0; w < 16; w++) {
++                                    g_string_append_printf(s, "%08x ", abuf[w]);
++                                }
++                                error_report("%s", s->str);
++                                g_string_free(s, TRUE);
++                            } else {
++                                error_report("SVC-AREA @ 0x%08x: failed ret=%d",
++                                             addrs[a], ret);
++                            }
++                        }
++                    }
++                } else {
++                    error_report("SVC-DUMP @ 0x%08x thumb=%d "
++                                 "r14=0x%08x r15=0x%08x "
++                                 "cpu_memory_rw_debug failed ret=%d",
++                                 svc_pc, env->thumb, env->regs[14],
++                                 env->regs[15], ret);
++                }
++                svc_dumped = true;
++            }
++        }
++        break;
++    }
++    case EXCP_IRQ:
++        EMU_PROF_INC(EMU_PROF_EXCP_IRQ);
++        break;
++    case EXCP_FIQ:
++        EMU_PROF_INC(EMU_PROF_EXCP_FIQ);
++        break;
++    case EXCP_UDEF:
++        EMU_PROF_INC(EMU_PROF_EXCP_UDEF);
++        break;
++    case EXCP_BKPT:
++        EMU_PROF_INC(EMU_PROF_EXCP_BKPT);
++        break;
++    default:
++        EMU_PROF_INC(EMU_PROF_EXCP_OTHER);
++        break;
++    }
++
+     assert(!arm_feature(env, ARM_FEATURE_M));
+ 
+     arm_log_exception(cs);

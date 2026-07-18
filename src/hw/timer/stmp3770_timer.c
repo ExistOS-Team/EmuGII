@@ -25,6 +25,7 @@
 #include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "hw/stmp3770_profile.h"
 
 /* Register offsets */
 #define REG_ROTCTRL         0x000
@@ -103,8 +104,6 @@
 /* APBX clock frequency used for TICK_ALWAYS / PWM sources */
 #define STMP3770_TIMROT_APB_FREQ    24000000
 #define STMP3770_TIMROT_ROTARY_FREQ 32768
-/* Cap duty-cycle sampling to avoid QEMU main loop thrashing. */
-#define STMP3770_TIMROT_DUTY_MAX_FREQ 1000000
 
 static void stmp3770_timer_reset(DeviceState *dev);
 static int stmp3770_timer_post_load(void *opaque, int version_id);
@@ -148,6 +147,17 @@ static unsigned int stmp3770_timer_rotary_samples_required(
                               ROTCTRL_OVERSAMPLE_MASK;
 
     return 1U << (3 - oversample);
+}
+
+static bool stmp3770_timer_rotary_uses_pwm(const STMP3770TimerState *s)
+{
+    unsigned int select_a = (s->rotctrl >> ROTCTRL_SELECT_A_SHIFT) &
+                            ROTCTRL_SELECT_A_MASK;
+    unsigned int select_b = (s->rotctrl >> ROTCTRL_SELECT_B_SHIFT) &
+                            ROTCTRL_SELECT_B_MASK;
+
+    return (select_a >= TIMCLK_PWM0 && select_a <= TIMCLK_PWM4) ||
+           (select_b >= TIMCLK_PWM0 && select_b <= TIMCLK_PWM4);
 }
 
 static bool stmp3770_timer_rotary_debounce(bool input, uint8_t *stable,
@@ -219,9 +229,10 @@ static void stmp3770_timer_rotary_tick(void *opaque)
     bool input_b;
     bool old_a;
     bool old_b;
+    int64_t t0 = EMU_PROF_TIME_START();
 
     if (s->rotctrl & (ROTCTRL_SFTRST | ROTCTRL_CLKGATE)) {
-        return;
+        goto out;
     }
 
     input_a = stmp3770_timer_rotary_input(
@@ -236,7 +247,7 @@ static void stmp3770_timer_rotary_tick(void *opaque)
         s->rotary_candidate_b = input_b;
         s->rotary_state = (input_b << 1) | input_a;
         s->rotary_initialized = true;
-        return;
+        goto out;
     }
 
     old_a = s->rotary_stable_a;
@@ -261,21 +272,22 @@ static void stmp3770_timer_rotary_tick(void *opaque)
                                          (s->rotary_stable_b << 1) |
                                          s->rotary_stable_a);
     }
+
+out:
+    EMU_PROF_INC(EMU_PROF_TIMROT_ROTARY);
+    EMU_PROF_TIME_END(EMU_PROF_TIMROT_ROTARY, t0);
 }
 
 static void stmp3770_timer_rearm_rotary(STMP3770TimerState *s,
                                         bool reset_sampling)
 {
-    unsigned int divider = (s->rotctrl >> ROTCTRL_DIVIDER_SHIFT) &
-                           ROTCTRL_DIVIDER_MASK;
-
     ptimer_transaction_begin(s->rotary_tick);
     ptimer_stop(s->rotary_tick);
-    if (s->rotctrl & (ROTCTRL_SFTRST | ROTCTRL_CLKGATE)) {
+    if ((s->rotctrl & (ROTCTRL_SFTRST | ROTCTRL_CLKGATE)) ||
+        !stmp3770_timer_rotary_uses_pwm(s)) {
         ptimer_transaction_commit(s->rotary_tick);
         return;
     }
-
     if (reset_sampling) {
         s->rotary_initialized = false;
         s->rotary_error = false;
@@ -283,7 +295,7 @@ static void stmp3770_timer_rearm_rotary(STMP3770TimerState *s,
         s->rotary_samples_b = 0;
     }
     ptimer_set_freq(s->rotary_tick, STMP3770_TIMROT_ROTARY_FREQ);
-    ptimer_set_limit(s->rotary_tick, divider + 1, 1);
+    ptimer_set_limit(s->rotary_tick, 1, 1);
     ptimer_run(s->rotary_tick, 0);
     ptimer_transaction_commit(s->rotary_tick);
 }
@@ -461,9 +473,6 @@ static void stmp3770_timer_configure(STMP3770TimerState *s, int idx,
                 s->pwm_input[test_signal - TIMCLK_PWM0];
             s->test_signal_seen = true;
         }
-        if (freq > STMP3770_TIMROT_DUTY_MAX_FREQ) {
-            freq = STMP3770_TIMROT_DUTY_MAX_FREQ;
-        }
         ptimer_set_freq(t->ptimer, freq);
         ptimer_set_limit(t->ptimer, 1, 1);
         ptimer_run(t->ptimer, 0);
@@ -518,16 +527,21 @@ static void stmp3770_timer_tick(void *opaque)
     STMP3770TimerState *s = info->s;
     int idx = info->idx;
     STMP3770TimerChannel *t = &s->timer[idx];
+    int64_t t0 = EMU_PROF_TIME_START();
 
     if (stmp3770_timer_is_duty_cycle(t, idx)) {
         s->duty_running_count++;
-        return;
+        goto out;
     }
 
     t->timctrl |= TIMCTRL_IRQ;
     /* For oneshot mode the ptimer stops automatically */
     t->running = (t->timctrl & TIMCTRL_RELOAD) != 0;
     stmp3770_timer_update_irq(s, idx);
+
+out:
+    EMU_PROF_INC(EMU_PROF_TIMROT_TICK);
+    EMU_PROF_TIME_END(EMU_PROF_TIMROT_TICK, t0);
 }
 
 static void stmp3770_timer_apply_write(uint32_t *reg, uint32_t mask,

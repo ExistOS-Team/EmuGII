@@ -124,6 +124,7 @@ def apply_patches(target, source, env):
     patch_exe = find_executable('patch', tool_env['PATH'])
 
     files_to_copy = [
+        ('src/include/hw/stmp3770_profile.h', 'include/hw/stmp3770_profile.h'),
         ('src/include/hw/arm/stmp3770.h', 'include/hw/arm/stmp3770.h'),
         ('src/include/hw/arm/stmp3770_uartdbg.h', 'include/hw/arm/stmp3770_uartdbg.h'),
         ('src/include/hw/arm/stmp3770_uartapp.h', 'include/hw/arm/stmp3770_uartapp.h'),

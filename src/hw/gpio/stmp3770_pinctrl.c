@@ -26,6 +26,7 @@
 #include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
+#include "hw/stmp3770_profile.h"
 
 /* Register offsets */
 #define REG_CTRL            0x000
@@ -225,10 +226,12 @@ static void stmp3770_pinctrl_sample_din(STMP3770PINCTRLState *s);
 void stmp3770_pinctrl_set_key(STMP3770PINCTRLState *s,
                               unsigned int key, bool down)
 {
+    int64_t t0;
     if (key >= 128) {
         return;
     }
 
+    t0 = EMU_PROF_TIME_START();
     if (down) {
         s->key_state[key >> 6] |= 1ULL << (key & 63);
     } else {
@@ -236,6 +239,9 @@ void stmp3770_pinctrl_set_key(STMP3770PINCTRLState *s,
     }
 
     stmp3770_pinctrl_sample_din(s);
+
+    EMU_PROF_INC(EMU_PROF_PINCTRL_KEY);
+    EMU_PROF_TIME_END(EMU_PROF_PINCTRL_KEY, t0);
 }
 
 void stmp3770_pinctrl_set_pwm_output(STMP3770PINCTRLState *s,
