@@ -103,6 +103,8 @@
 /* APBX clock frequency used for TICK_ALWAYS / PWM sources */
 #define STMP3770_TIMROT_APB_FREQ    24000000
 #define STMP3770_TIMROT_ROTARY_FREQ 32768
+/* Cap duty-cycle sampling to avoid QEMU main loop thrashing. */
+#define STMP3770_TIMROT_DUTY_MAX_FREQ 1000000
 
 static void stmp3770_timer_reset(DeviceState *dev);
 static int stmp3770_timer_post_load(void *opaque, int version_id);
@@ -458,6 +460,9 @@ static void stmp3770_timer_configure(STMP3770TimerState *s, int idx,
             s->test_signal_level =
                 s->pwm_input[test_signal - TIMCLK_PWM0];
             s->test_signal_seen = true;
+        }
+        if (freq > STMP3770_TIMROT_DUTY_MAX_FREQ) {
+            freq = STMP3770_TIMROT_DUTY_MAX_FREQ;
         }
         ptimer_set_freq(t->ptimer, freq);
         ptimer_set_limit(t->ptimer, 1, 1);

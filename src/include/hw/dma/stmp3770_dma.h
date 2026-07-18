@@ -82,6 +82,12 @@ typedef struct STMP3770DMAChannel {
      */
     bool wait4endcmd_pending;
     bool wait4endcmd_completion;
+
+    /* Pre-allocated transfer buffer reused for this channel to avoid
+     * a g_malloc0/g_free cycle on every DMA command.
+     */
+    uint8_t *xfer_buf;
+    size_t xfer_buf_size;
 } STMP3770DMAChannel;
 
 struct STMP3770DMAState {

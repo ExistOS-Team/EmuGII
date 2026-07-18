@@ -24,13 +24,22 @@ QEMU_SOURCE = os.path.join(PROJECT_ROOT, 'ThirdParty', 'qemu')
 BUILD_DIR = os.path.join(PROJECT_ROOT, 'build')
 QEMU_BUILD = os.path.join(BUILD_DIR, 'qemu')
 QEMU_BUILDDIR = os.path.join(QEMU_BUILD, 'build')
+
+# Windows 构建判定：原生 Windows Python 的 IS_WINDOWS_BUILD；在 MSYS2/MINGW64
+# shell 里 os.name 可能为 'posix'，但 MSYSTEM 环境变量会暴露 MINGW*/UCRT*/CLANG*。
+_MSYSTEM = os.environ.get('MSYSTEM', '')
+IS_WINDOWS_BUILD = (
+    os.name == 'nt' or
+    _MSYSTEM.upper().startswith(('MINGW', 'UCRT', 'CLANG'))
+)
+
 RELEASE_DIR = os.path.join(BUILD_DIR, 'EmuGii')
-RELEASE_BINARY = 'EmuGii.exe' if os.name == 'nt' else 'EmuGii'
-RELEASE_RUNTIME_DIR = 'bin' if os.name == 'nt' else ''
+RELEASE_BINARY = 'EmuGii.exe' if IS_WINDOWS_BUILD else 'EmuGii'
+RELEASE_RUNTIME_DIR = 'bin' if IS_WINDOWS_BUILD else ''
 RELEASE_FIRMWARE_DIR = 'firmware'
 RELEASE_RUNTIME_BINARY = (
     os.path.join(RELEASE_RUNTIME_DIR, 'EmuGii-runtime.exe')
-    if os.name == 'nt' else RELEASE_BINARY
+    if IS_WINDOWS_BUILD else RELEASE_BINARY
 )
 PATCHES_DIR = os.path.join(PROJECT_ROOT, 'patches')
 SRC_DIR = os.path.join(PROJECT_ROOT, 'src')
@@ -39,6 +48,11 @@ SRC_SCONSOURCES = Glob('src/**/*', strings=True) + Glob('src/**/**/*', strings=T
 
 # SCons 环境
 env = Environment(ENV=os.environ)
+
+# 构建类型：默认 release；通过 scons debug=1 或 EMUGII_DEBUG=1 启用 debug
+DEBUG_BUILD = ARGUMENTS.get('debug', os.environ.get('EMUGII_DEBUG', '0')).lower() in (
+    '1', 'yes', 'true', 'on')
+QEMU_DEBUG_FLAG = '--enable-debug' if DEBUG_BUILD else ''
 
 
 def prepare_bash_env(base_env):
@@ -244,9 +258,10 @@ def configure_qemu(target, source, env):
 
     configure_cmd = [
         bash, '-lc',
-        'cd {} && CC=gcc CXX=g++ {} --target-list=arm-softmmu --enable-debug --disable-werror --disable-vhost-user --disable-libvduse --disable-guest-agent'.format(
+        'cd {} && CC=gcc CXX=g++ {} --target-list=arm-softmmu {} --disable-werror --disable-vhost-user --disable-libvduse --disable-guest-agent'.format(
             shlex.quote(build_dir_unix),
-            shlex.quote(f'{qemu_dir_unix}/configure')
+            shlex.quote(f'{qemu_dir_unix}/configure'),
+            QEMU_DEBUG_FLAG
         )
     ]
 
@@ -315,14 +330,14 @@ def package_release(target, source, env):
         root_rom if os.path.exists(root_rom) else fixture_rom,
         root_flash if os.path.exists(root_flash) else fixture_flash,
     ]
-    binary_name = 'qemu-system-arm.exe' if os.name == 'nt' else 'qemu-system-arm'
+    binary_name = 'qemu-system-arm.exe' if IS_WINDOWS_BUILD else 'qemu-system-arm'
     binary_path = os.path.join(build_dir, binary_name)
     dependency_names = []
     tool_env, bash = prepare_bash_env(env['ENV'])
     dependency_path = tool_env.get('PATH', os.environ.get('PATH', ''))
     dependency_reader = None
 
-    if os.name == 'nt' and os.path.exists(binary_path):
+    if IS_WINDOWS_BUILD and os.path.exists(binary_path):
         if bash:
             def dependency_reader(path):
                 path_unix = to_msys_path(os.path.abspath(path))
@@ -375,6 +390,7 @@ def package_release(target, source, env):
         dependency_names=dependency_names,
         path_env=dependency_path,
         import_reader=dependency_reader,
+        os_name='nt' if IS_WINDOWS_BUILD else 'posix',
         binary_dest_name=RELEASE_RUNTIME_BINARY,
         dependency_dest_dir=RELEASE_RUNTIME_DIR or None,
         runtime_dest_dir=RELEASE_FIRMWARE_DIR,
@@ -392,7 +408,7 @@ def package_release(target, source, env):
         print(f"  已复制: {dst_name}")
         copied += 1
 
-    if os.name == 'nt':
+    if IS_WINDOWS_BUILD:
         try:
             gcc_exe = find_executable('gcc', tool_env['PATH'])
             result = subprocess.run(
@@ -442,7 +458,7 @@ def run_stmp3770_qtest(target, source, env):
 
     env_vars['EMUGII_QEMU_BINARY'] = os.path.join(
         qemu_build_dir,
-        'qemu-system-arm.exe' if os.name == 'nt' else 'qemu-system-arm',
+        'qemu-system-arm.exe' if IS_WINDOWS_BUILD else 'qemu-system-arm',
     )
     env_vars['EMUGII_QEMU_CWD'] = qemu_build_dir
 

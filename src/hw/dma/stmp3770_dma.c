@@ -396,11 +396,21 @@ static void stmp3770_dma_run_channel(STMP3770DMAState *s, int ch_idx)
         }
 
         if (xfer_count > 0) {
-            g_autofree uint8_t *buf = g_malloc0(xfer_count);
+            uint8_t *buf = ch->xfer_buf;
             bool transfer_ok = false;
             int consumed = 0;
 
+            /* Reuse or grow per-channel pre-allocated buffer. */
+            if (xfer_count > ch->xfer_buf_size) {
+                g_free(ch->xfer_buf);
+                ch->xfer_buf = g_malloc(xfer_count);
+                ch->xfer_buf_size = xfer_count;
+                buf = ch->xfer_buf;
+            }
+
             if (command == COMMAND_DMA_WRITE) {
+                /* Ensure unhandled bytes written to guest memory are zero. */
+                memset(buf, 0, xfer_count);
                 /*
                  * WRITE (MXS convention): peripheral -> memory.  Ask the
                  * handler to fill the buffer, then write it to guest memory
@@ -869,6 +879,20 @@ static void stmp3770_dma_init(Object *obj)
 
     for (i = 0; i < STMP3770_DMA_NUM_CHANNELS; i++) {
         sysbus_init_irq(sbd, &s->irq[i]);
+        s->ch[i].xfer_buf = NULL;
+        s->ch[i].xfer_buf_size = 0;
+    }
+}
+
+static void stmp3770_dma_finalize(Object *obj)
+{
+    STMP3770DMAState *s = STMP3770_DMA(obj);
+    int i;
+
+    for (i = 0; i < STMP3770_DMA_NUM_CHANNELS; i++) {
+        g_free(s->ch[i].xfer_buf);
+        s->ch[i].xfer_buf = NULL;
+        s->ch[i].xfer_buf_size = 0;
     }
 }
 
@@ -949,6 +973,7 @@ static const TypeInfo stmp3770_dma_type_info = {
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(STMP3770DMAState),
     .instance_init = stmp3770_dma_init,
+    .instance_finalize = stmp3770_dma_finalize,
     .class_init    = stmp3770_dma_class_init,
     .abstract      = true,
 };

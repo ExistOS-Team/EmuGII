@@ -1837,7 +1837,7 @@ static const VMStateDescription vmstate_gpmi = {
     }
 };
 
-static Property gpmi_properties[] = {
+static const Property gpmi_properties[] = {
     DEFINE_PROP_DRIVE("drive", STMP3770GPMIState, blk),
 };
 

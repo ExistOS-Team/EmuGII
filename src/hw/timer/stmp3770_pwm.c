@@ -46,6 +46,9 @@
 #define CTRL0_PWM_ENABLE(chan) (1U << (chan))
 
 #define PWM_CLOCK_HZ 24000000
+/* Cap the PWM timer frequency to avoid QEMU main loop thrashing when the
+ * guest configures a very high toggle rate. */
+#define PWM_MAX_FREQ 1000000
 #define PERIOD_MATT  (1U << 23)
 #define PERIOD_CDIV_SHIFT 20
 #define PERIOD_ACTIVE_STATE_SHIFT 16
@@ -117,6 +120,10 @@ static void pwm_latch_channel(STMP3770PWMState *s, unsigned ch,
     uint32_t frequency = channel->pending_period & PERIOD_MATT ?
                          PWM_CLOCK_HZ * 2 :
                          PWM_CLOCK_HZ / pwm_dividers[cdiv];
+
+    if (frequency > PWM_MAX_FREQ) {
+        frequency = PWM_MAX_FREQ;
+    }
 
     channel->latched_active = channel->pending_active;
     channel->latched_period = channel->pending_period;

@@ -98,7 +98,6 @@ enum {
 #define ICOLL_SFTRST_DELAY_NS          \
     ((ICOLL_SFTRST_CLOCKS * NANOSECONDS_PER_SECOND + \
       ICOLL_RESET_CLOCK_HZ - 1) / ICOLL_RESET_CLOCK_HZ)
-#define ICOLL_MULTICYCLE_CLOCKS        1ULL
 
 /* STAT register bits */
 #define STAT_VECTOR_NUMBER_MASK 0x3F
@@ -162,14 +161,14 @@ void stmp3770_icoll_set_hclk_rate(void *opaque, uint32_t hclk_hz)
     s->hclk_hz = hclk_hz ? hclk_hz : ICOLL_RESET_CLOCK_HZ;
 }
 
-static uint64_t stmp3770_icoll_multicycle_step_ns(const STMP3770ICOLLState *s)
-{
-    uint32_t hz = s->hclk_hz ? s->hclk_hz : ICOLL_RESET_CLOCK_HZ;
-
-    return (ICOLL_MULTICYCLE_CLOCKS * NANOSECONDS_PER_SECOND + hz - 1) / hz;
-}
-
 static void stmp3770_icoll_multicycle_tick(void *opaque);
+
+static void stmp3770_icoll_set_pending(STMP3770ICOLLState *s)
+{
+    s->fsm_state = ICOLL_FSM_PENDING;
+    s->vector = s->selected_vector;
+    s->vector_pending = true;
+}
 
 static void stmp3770_icoll_reset(DeviceState *dev);
 static void stmp3770_icoll_update(STMP3770ICOLLState *s);
@@ -473,17 +472,12 @@ static void stmp3770_icoll_update(STMP3770ICOLLState *s)
                                       &has_candidate);
         if (has_candidate) {
             s->selected_vector = selected_vector;
-            /*
-             * If the timer was stopped (e.g. by CLKGATE), resume the
-             * remaining delay so the FSM can reach PENDING.
-             */
-            if (!timer_pending(s->multicycle_timer)) {
-                timer_mod(s->multicycle_timer,
-                          qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                          stmp3770_icoll_multicycle_step_ns(s));
-            }
+            /* Complete the vector generation synchronously instead of
+             * scheduling two 1-HCLK timers that thrash the main loop. */
+            timer_del(s->multicycle_timer);
+            stmp3770_icoll_set_pending(s);
             qemu_set_irq(s->fiq, fiq_enabled && stmp3770_icoll_fiq_pending(s));
-            qemu_set_irq(s->irq, 0);
+            qemu_set_irq(s->irq, irq_enabled && s->vector_pending);
             return;
         }
 
@@ -512,14 +506,10 @@ static void stmp3770_icoll_update(STMP3770ICOLLState *s)
 
     if (has_candidate) {
         s->saved_vector = s->vector;
-        s->vector = 0;
         s->selected_vector = selected_vector;
-        s->fsm_state = ICOLL_FSM_MULTICYCLE1;
-        timer_mod(s->multicycle_timer,
-                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                  stmp3770_icoll_multicycle_step_ns(s));
+        stmp3770_icoll_set_pending(s);
         qemu_set_irq(s->fiq, fiq_enabled && stmp3770_icoll_fiq_pending(s));
-        qemu_set_irq(s->irq, 0);
+        qemu_set_irq(s->irq, irq_enabled && s->vector_pending);
         return;
     }
 
@@ -553,22 +543,19 @@ static void stmp3770_icoll_multicycle_tick(void *opaque)
 {
     STMP3770ICOLLState *s = STMP3770_ICOLL(opaque);
 
-    switch (s->fsm_state) {
-    case ICOLL_FSM_MULTICYCLE1:
-        s->fsm_state = ICOLL_FSM_MULTICYCLE2;
-        timer_mod(s->multicycle_timer,
-                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                  stmp3770_icoll_multicycle_step_ns(s));
-        break;
-    case ICOLL_FSM_MULTICYCLE2:
-        s->fsm_state = ICOLL_FSM_PENDING;
-        s->vector = s->selected_vector;
-        s->vector_pending = true;
+    /*
+     * The real hardware inserts a two-HCLK delay before the vector is
+     * visible.  In QEMU modeling this with sub-TB timers causes one timer
+     * fire per HCLK, which dominates the main loop.  Complete the FSM
+     * step immediately; the delay is below the CPU exception latency
+     * visible to guest software.
+     */
+    if (s->fsm_state == ICOLL_FSM_MULTICYCLE1 ||
+        s->fsm_state == ICOLL_FSM_MULTICYCLE2) {
+        timer_del(s->multicycle_timer);
+        stmp3770_icoll_set_pending(s);
         qemu_set_irq(s->irq, (s->ctrl & CTRL_IRQ_FINAL_ENABLE) &&
                              s->vector_pending);
-        break;
-    default:
-        break;
     }
 }
 
